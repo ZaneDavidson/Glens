@@ -123,7 +123,8 @@ def embed_sequences(
     )
     model.to(torch_device)
 
-    special_tokens = int(tokenizer.num_special_tokens_to_add(pair=False))
+    # use this if I add a truncation strategy later:
+    # special_tokens = int(tokenizer.num_special_tokens_to_add(pair=False))
     token_ids = _token_ids(tokenizer)
     use_amp = mixed_precision and torch_device.type == "cuda"
     embeddings: list[np.ndarray] = []
@@ -149,7 +150,7 @@ def embed_sequences(
             seqs,
             add_special_tokens=True,
             padding=True,
-            max_length=max_residues + special_tokens,
+            truncation=False,
             return_tensors="pt",
         )
         batch = {key: value.to(torch_device) for key, value in batch.items()}

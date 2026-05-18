@@ -5,15 +5,12 @@ Typer CLI for embedding unique GPCRs from GPCRdb common coupling map.
 #TODO: I want to make this less GPCRdb facing. Yes, that is where data is ingested now but
 # what about new assays? Needs functionality for embedding just from a UniProt accession list.
 
-from __future__ import annotations
-
 import csv
 import re
 import numpy as np
 from collections.abc import Iterable, Iterator
 from itertools import chain
 from pathlib import Path
-from typing import Any
 from tqdm.auto import tqdm
 
 import requests
@@ -22,7 +19,9 @@ import typer
 from glens.models.embed_model import DEFAULT_MAX_RESIDUES, DEFAULT_MODEL_ID, embed_sequences, load_plm
 
 app = typer.Typer(no_args_is_help=True)
-UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
+UNIPROT_ENTRY_FASTA_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.fasta"
+UNIPROT_ENTRY_JSON_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.json"
+UNIPROT_ENTRY_RE = re.compile(r"^[a-z0-9]+_[a-z0-9]+$")
 GPCRDB_ENTRY_RE = re.compile(r"/protein/([^/?#]+)")
 
 
@@ -62,48 +61,68 @@ def iter_gpcrdb_entry_names(path: Path, column: str = "GPCRdb") -> Iterator[str]
                 continue
             value = row[idx].strip()
             match = GPCRDB_ENTRY_RE.search(value)
-            entry_name = match.group(1) if match else value
-            entry_name = entry_name.strip().lower()
-            if not entry_name or entry_name in seen:
+            entry_name = (match.group(1) if match else value).strip().lower()
+
+            if not UNIPROT_ENTRY_RE.match(entry_name): # Skip malformed rows
                 continue
+
+            if entry_name in seen:
+                continue
+
             seen.add(entry_name)
             yield entry_name
 
+def _parse_fasta_sequence(text: str) -> str:
+    return "".join(
+        line.strip()
+        for line in text.splitlines()
+        if line and not line.startswith(">")
+    )
 
+#TODO: When constructing metadata, refactor some of this so we can grab taxon and organism
 def fetch_uniprot_sequence(
     entry_name: str,
     session: requests.Session,
     timeout: float = 30.0,
 ) -> dict[str, str]:
-    """Resolve a GPCRdb entry name like ``5ht1a_human`` to a UniProt sequence."""
-    params = {
-        "query": f"id:{entry_name.upper()}",
-        "fields": "accession,id,sequence",
-        "format": "json",
-        "size": 1,
-    }
-    response = session.get(UNIPROT_SEARCH_URL, params=params, timeout=timeout)
-    response.raise_for_status()
-    results: list[dict[str, Any]] = response.json().get("results", [])
+    """
+    Resolve a GPCRdb entry name to a UniProt sequence.
+    """
+    entry_id = entry_name.upper()
 
-    if not results:
-        params["query"] = f"{entry_name.upper()} AND organism_id:9606"
-        response = session.get(UNIPROT_SEARCH_URL, params=params, timeout=timeout)
-        response.raise_for_status()
-        results = response.json().get("results", [])
+    json_response = session.get(
+        UNIPROT_ENTRY_JSON_URL.format(entry_id=entry_id),
+        timeout=timeout,
+    )
+    json_response.raise_for_status()
+    record = json_response.json()
 
-    if not results:
-        raise LookupError(f"No UniProt sequence found for {entry_name!r}")
+    accession = record.get("primaryAccession")
+    uniprot_id = record.get("uniProtkbId", entry_id)
 
-    record = results[0]
+    if not accession:
+        raise LookupError(f"UniProt record for {entry_name!r} did not include an accession")
+
     sequence = record.get("sequence", {}).get("value")
+
     if not sequence:
-        raise LookupError(f"UniProt record for {entry_name!r} did not include a sequence")
+        fasta_response = session.get(
+            UNIPROT_ENTRY_FASTA_URL.format(entry_id=accession),
+            timeout=timeout,
+        )
+        fasta_response.raise_for_status()
+        sequence = _parse_fasta_sequence(fasta_response.text)
+
+    if not sequence:
+        raise LookupError(
+            f"UniProt record for {entry_name!r} resolved to "
+            f"{uniprot_id!r} / {accession!r}, but no sequence was found"
+        )
 
     return {
         "gpcrdb_entry_name": entry_name,
-        "uniprot_accession": record.get("primaryAccession", ""),
-        "uniprot_id": record.get("uniProtkbId", entry_name.upper()),
+        "uniprot_accession": accession,
+        "uniprot_id": uniprot_id,
         "sequence": sequence,
     }
 
@@ -130,6 +149,7 @@ def _write_embedding_batch(
         writer.writerow(out)
 
 
+#TODO: Change output artifact from csv to npz for ml flow
 @app.command()
 def coupling_map(
     input_csv: Path = typer.Argument(..., help="GPCR common coupling map CSV."),
