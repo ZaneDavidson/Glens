@@ -14,11 +14,13 @@
 ###########
 bin/
 build/
+data/
 dist/
 local/
 tmp/
 __pycache__/
 .ipynb_checkpoints/
+.venv/
 .vscode/
 
 # Discards #

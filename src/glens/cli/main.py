@@ -1,6 +1,7 @@
 import typer
 
 from .. import __version__
+from ..models.batch_embed import app as batch_embed_app
 
 app = typer.Typer(
     help=(
@@ -10,7 +11,9 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+
 # Nest tools inside main CLI entry point here:
+app.add_typer(batch_embed_app, name="embed", help="Batch embed a list of amino-acid sequences")
 
 
 @app.callback(invoke_without_command=True)
