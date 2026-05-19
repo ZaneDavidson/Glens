@@ -79,6 +79,9 @@ def _parse_fasta_sequence(text: str) -> str:
         if line and not line.startswith(">")
     )
 
+def _n_chunks(sequence_length: int, max_residues: int) -> int:
+    return (sequence_length + max_residues - 1) // max_residues
+
 #TODO: When constructing metadata, refactor some of this so we can grab taxon and organism
 def fetch_uniprot_sequence(
     entry_name: str,
@@ -135,16 +138,15 @@ def _write_embedding_batch(
     writer: csv.DictWriter[str],
     rows: list[dict[str, str]],
     embeddings: np.ndarray,
-    include_sequence: bool,
 ) -> None:
     for row, emb in zip(rows, embeddings, strict=True):
         out: dict[str, str | float] = {
             "gpcrdb_entry_name": row["gpcrdb_entry_name"],
             "uniprot_accession": row["uniprot_accession"],
             "uniprot_id": row["uniprot_id"],
+            "sequence_length": row["sequence_length"],
+            "n_chunks": row["n_chunks"],
         }
-        if include_sequence:
-            out["sequence"] = row["sequence"]
         out.update({f"esm2_{i:04d}": float(value) for i, value in enumerate(emb)})
         writer.writerow(out)
 
@@ -159,7 +161,6 @@ def coupling_map(
     batch_size: int = typer.Option(8, min=1, help="Sequences per embedding batch."),
     device: str = typer.Option("auto", help="auto, cuda, mps, or cpu."),
     max_residues: int = typer.Option(DEFAULT_MAX_RESIDUES, min=1, help="Maximum residues accepted by the model."), # is this even useful?
-    include_sequence: bool = typer.Option(False, help="Include fetched sequences in the output CSV."),
 ) -> None:
     """Fetch UniProt sequences for unique receptors, and write embeddings."""
     entry_names = list(iter_gpcrdb_entry_names(input_csv, gpcrdb_column))
@@ -182,7 +183,13 @@ def coupling_map(
         ) as bar:
             for idx, entry_name in enumerate(entry_names, start=1):
                 bar.set_postfix_str(f"fetch {entry_name}")
-                batch_rows.append(fetch_uniprot_sequence(entry_name, session))
+
+                row = fetch_uniprot_sequence(entry_name, session)
+                sequence_length = len(row["sequence"])
+                row["sequence_length"] = str(sequence_length)
+                row["n_chunks"] = str(_n_chunks(sequence_length, max_residues))
+
+                batch_rows.append(row)
 
                 is_full_batch = len(batch_rows) == batch_size
                 is_last_batch = idx == len(entry_names)
@@ -205,9 +212,13 @@ def coupling_map(
                 )
 
                 if writer is None:
-                    meta = ["gpcrdb_entry_name", "uniprot_accession", "uniprot_id"]
-                    if include_sequence:
-                        meta.append("sequence")
+                    meta = [
+                        "gpcrdb_entry_name",
+                        "uniprot_accession",
+                        "uniprot_id",
+                        "sequence_length",
+                        "n_chunks",
+                    ]
 
                     writer = csv.DictWriter(
                         handle,
@@ -216,7 +227,7 @@ def coupling_map(
                     writer.writeheader()
 
                 bar.set_postfix_str("write output")
-                _write_embedding_batch(writer, batch_rows, embeddings, include_sequence)
+                _write_embedding_batch(writer, batch_rows, embeddings)
 
                 bar.update(len(batch_rows))
                 batch_rows = []

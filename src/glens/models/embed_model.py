@@ -19,8 +19,16 @@ class TokenIds(NamedTuple):
     pad_id: int | None
 
 
+class SequenceChunk(NamedTuple):
+    sequence_index: int
+    sequence: str
+    length: int
+
+
 def resolve_device(device: str = "auto") -> torch.device:
-    """Resolve available hardware acceleration into a torch device."""
+    """
+    Resolve available hardware acceleration into a torch device.
+    """
     if device != "auto":
         return torch.device(device)
     if torch.cuda.is_available():
@@ -34,7 +42,9 @@ def load_plm(
     model_id: str = DEFAULT_MODEL_ID,
     device: str | torch.device = "auto",
 ) -> tuple[Any, torch.nn.Module, torch.device]:
-    """Load tokenizer/model pair in eval config."""
+    """
+    Load tokenizer/model pair in eval mode.
+    """
     try:
         from transformers import AutoModel, AutoTokenizer
     except ImportError as err:  # pragma: no cover
@@ -79,7 +89,7 @@ def _mean_pool(
     return sums / counts
 
 
-def _batched(items: Iterable[str], batch_size: int) -> Iterator[list[str]]:
+def _batched(items: Iterable[Any], batch_size: int) -> Iterator[list[Any]]:
     batch: list[str] = []
     for item in items:
         batch.append(item)
@@ -92,6 +102,19 @@ def _batched(items: Iterable[str], batch_size: int) -> Iterator[list[str]]:
 
 def _clean_sequence(sequence: str) -> str:
     return "".join(str(sequence).split()).upper()
+
+def _iter_chunks(
+    sequence: str,
+    sequence_index: int,
+    max_residues: int,
+) -> Iterator[SequenceChunk]:
+    for start in range(0, len(sequence), max_residues):
+        chunk = sequence[start : start + max_residues]
+        yield SequenceChunk(
+            sequence_index=sequence_index,
+            sequence=chunk,
+            length=len(chunk),
+        )
 
 
 def embed_sequences(
@@ -135,51 +158,61 @@ def embed_sequences(
         if empty:
             raise ValueError(f"Empty sequence at batch positions: {empty}")
 
-        #TODO: I really don't want to error on overlongs, but nor do I want to truncate.
-        # Later, implement a chunker and stitcher with a 1022 res window
-        overlong = [(idx, len(seq)) for idx, seq in enumerate(seqs) if len(seq) > max_residues]
-        if overlong:
-            details = ", ".join(f"{idx}:{length}" for idx, length in overlong)
-            raise ValueError(
-                f"Sequences exceeding max_residues={max_residues} at batch positions "
-                f"(position:length): {details}"
+        chunks = [
+            chunk
+            for seq_idx, seq in enumerate(seqs)
+            for chunk in _iter_chunks(seq, seq_idx, max_residues)
+        ]
+
+        residue_counts = np.array([len(seq) for seq in seqs], dtype=np.float32)
+        weighted_sums: np.ndarray | None = None
+
+        for chunk_batch in _batched(chunks, batch_size):
+            batch = tokenizer(
+                [chunk.sequence for chunk in chunk_batch],
+                add_special_tokens=True,
+                padding=True,
+                truncation=False,
+                return_tensors="pt",
+            )
+            batch = {key: value.to(torch_device) for key, value in batch.items()}
+
+            with torch.inference_mode(), torch.autocast(
+                device_type=torch_device.type,
+                enabled=use_amp,
+            ):
+                out = model(**batch, output_hidden_states=layer != -1)
+
+            if layer == -1:
+                token_reps = out.last_hidden_state
+            else:
+                if out.hidden_states is None:
+                    raise RuntimeError("Model did not return hidden states.")
+                try:
+                    token_reps = out.hidden_states[layer]
+                except IndexError as err:
+                    raise ValueError(f"Invalid layer index: {layer}") from err
+
+            pooled = _mean_pool(
+                last_hidden=token_reps,
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                token_ids=token_ids,
             )
 
+            arr = pooled.detach().cpu().float().numpy()
 
-        batch = tokenizer(
-            seqs,
-            add_special_tokens=True,
-            padding=True,
-            truncation=False,
-            return_tensors="pt",
-        )
-        batch = {key: value.to(torch_device) for key, value in batch.items()}
+            if weighted_sums is None:
+                weighted_sums = np.zeros((len(seqs), arr.shape[1]), dtype=np.float32)
 
-        with torch.inference_mode(), torch.autocast(
-            device_type=torch_device.type,
-            enabled=use_amp,
-        ):
-            out = model(**batch, output_hidden_states=layer != -1)
+            for chunk, chunk_embedding in zip(chunk_batch, arr, strict=True):
+                weighted_sums[chunk.sequence_index] += chunk_embedding * chunk.length
 
-        if layer == -1:
-            token_reps = out.last_hidden_state
-        else:
-            if out.hidden_states is None:
-                raise RuntimeError("Model did not return hidden states.")
-            try:
-                token_reps = out.hidden_states[layer]
-            except IndexError as err:
-                raise ValueError(f"Invalid layer index: {layer}") from err
+        if weighted_sums is None:
+            continue
 
-        pooled = _mean_pool(
-            last_hidden=token_reps,
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            token_ids=token_ids,
-        )
-
-        arr = pooled.detach().cpu().float().numpy()
-        embeddings.extend(arr)
+        batch_embeddings = weighted_sums / residue_counts[:, None]
+        embeddings.extend(batch_embeddings)
 
     if not embeddings:
         return (
@@ -196,7 +229,6 @@ class RegularizedRegression:
     """
     Regularize embeddings, then fit ElasticNet to continuous targets.
     """
-
     def __init__(self, alpha: float = 1.0, l1_ratio: float = 0.5) -> None:
         self.scaler = StandardScaler()
         self.model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
