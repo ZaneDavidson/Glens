@@ -6,7 +6,10 @@ Typer CLI for embedding unique GPCRs from GPCRdb common coupling map.
 # what about new assays? Needs functionality for embedding just from a UniProt accession list.
 
 import csv
+import json
 import re
+from datetime import UTC, datetime
+
 import numpy as np
 from collections.abc import Iterable, Iterator
 from itertools import chain
@@ -34,8 +37,10 @@ def _column_index(row: list[str], name: str) -> int | None:
     return cleaned.index(name) if name in cleaned else None
 
 
-def iter_gpcrdb_entry_names(path: Path, column: str = "GPCRdb") -> Iterator[str]:
-    """Yield unique GPCRdb/UniProt-style entry names from a coupling map CSV."""
+def _iter_gpcrdb_entry_names(path: Path, column: str = "GPCRdb") -> Iterator[str]:
+    """
+    Yield unique GPCRdb/UniProt-style entry names from a coupling map CSV.
+    """
     with path.open(newline="") as handle:
         reader = csv.reader(handle)
         first = next(reader, None)
@@ -130,51 +135,143 @@ def fetch_uniprot_sequence(
     }
 
 
-def _embedding_header(dim: int) -> list[str]:
-    return [f"esm2_{i:04d}" for i in range(dim)]
+def _metadata_json_path(output_npz: Path) -> Path:
+    return output_npz.with_suffix(".metadata.json")
 
 
-def _write_embedding_batch(
-    writer: csv.DictWriter[str],
-    rows: list[dict[str, str]],
-    embeddings: np.ndarray,
+def _audit_csv_path(output_npz: Path) -> Path:
+    return output_npz.with_suffix(".audit.csv")
+
+
+def _write_npz(
+    output_npz: Path,
+    records: list[dict[str, str]],
+    X: np.ndarray,
 ) -> None:
-    for row, emb in zip(rows, embeddings, strict=True):
-        out: dict[str, str | float] = {
-            "gpcrdb_entry_name": row["gpcrdb_entry_name"],
-            "uniprot_accession": row["uniprot_accession"],
-            "uniprot_id": row["uniprot_id"],
-            "sequence_length": row["sequence_length"],
-            "n_chunks": row["n_chunks"],
-        }
-        out.update({f"esm2_{i:04d}": float(value) for i, value in enumerate(emb)})
-        writer.writerow(out)
+    payload = {
+        "X": X.astype(np.float32, copy=False),
+        "gpcrdb_entry_name": np.array(
+            [row["gpcrdb_entry_name"] for row in records],
+            dtype=str,
+        ),
+        "uniprot_accession": np.array(
+            [row["uniprot_accession"] for row in records],
+            dtype=str,
+        ),
+        "uniprot_id": np.array(
+            [row["uniprot_id"] for row in records],
+            dtype=str,
+        ),
+        "sequence_length": np.array(
+            [int(row["sequence_length"]) for row in records],
+            dtype=np.int32,
+        ),
+        "n_chunks": np.array(
+            [int(row["n_chunks"]) for row in records],
+            dtype=np.int16,
+        ),
+    }
+
+    np.savez_compressed(output_npz, **payload)
+
+
+def _write_metadata_json(
+    output_npz: Path,
+    *,
+    input_csv: Path,
+    model_id: str,
+    max_residues: int,
+    X: np.ndarray,
+    gpcrdb_column: str,
+    audit_csv: Path | None,
+) -> None:
+    metadata = {
+        "source_csv": str(input_csv),
+        "output_npz": str(output_npz),
+        "audit_csv": str(audit_csv) if audit_csv is not None else None,
+        "model_id": model_id,
+        "embedding_key": "X",
+        "embedding_shape": list(X.shape),
+        "embedding_dim": int(X.shape[1]),
+        "dtype": str(X.dtype),
+        "pooling": "mean_residue_tokens",
+        "chunking": "non_overlapping_length_weighted",
+        "max_residues": max_residues,
+        "gpcrdb_column": gpcrdb_column,
+        "created_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+    _metadata_json_path(output_npz).write_text(
+        json.dumps(metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_audit_csv(
+    audit_csv: Path,
+    records: list[dict[str, str]],
+) -> None:
+    fieldnames = [
+        "gpcrdb_entry_name",
+        "uniprot_accession",
+        "uniprot_id",
+        "sequence_length",
+        "n_chunks",
+    ]
+
+    with audit_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in records:
+            writer.writerow({field: row[field] for field in fieldnames})
 
 
 #TODO: Change output artifact from csv to npz for ml flow
 @app.command()
 def coupling_map(
     input_csv: Path = typer.Argument(..., help="GPCR common coupling map CSV."),
-    output_csv: Path = typer.Argument(..., help="Output embedding CSV."),
+    output_npz: Path = typer.Argument(..., help="Output compressed NPZ embedding artifact."),
     gpcrdb_column: str = typer.Option("GPCRdb", help="Column containing GPCRdb URLs/entry names."),
     model_id: str = typer.Option(DEFAULT_MODEL_ID, help="Hugging Face ESM-2 model id."),
     batch_size: int = typer.Option(8, min=1, help="Sequences per embedding batch."),
     device: str = typer.Option("auto", help="auto, cuda, mps, or cpu."),
     max_residues: int = typer.Option(DEFAULT_MAX_RESIDUES, min=1, help="Maximum residues accepted by the model."), # is this even useful?
+    write_audit_csv: bool = typer.Option(
+    True,
+    "--audit/--no-audit",
+    help="Write a small output audit CSV, containing protein entry name, uniprot accession and id, and number of embedding chunks.",
+    ),
+    write_metadata_json: bool = typer.Option(
+        True,
+        "--md/--no-md",
+        help="""
+        Write metadata containing information from the embedding model and its parameters, 
+        including model type, embedding shape and dimension, and output .npz dimensions.
+        """,
+    ),
 ) -> None:
-    """Fetch UniProt sequences for unique receptors, and write embeddings."""
-    entry_names = list(iter_gpcrdb_entry_names(input_csv, gpcrdb_column))
+    """
+    Fetch UniProt sequences for unique receptors, and write embeddings.
+    """
+
+    entry_names = list(_iter_gpcrdb_entry_names(input_csv, gpcrdb_column))
     if not entry_names:
         raise typer.BadParameter("No receptor entries found in the coupling map.")
 
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    if output_npz.suffix != ".npz":
+        raise typer.BadParameter("Output path must end in .npz")
+
+    output_npz.parent.mkdir(parents=True, exist_ok=True)
+
     tokenizer, model, torch_device = load_plm(model_id, device=device)
     typer.echo(f"Embedding {len(entry_names)} unique receptors on {torch_device}.")
 
-    writer: csv.DictWriter[str] | None = None
+    records: list[dict[str, str]] = []
+    embedding_blocks: list[np.ndarray] = []
     batch_rows: list[dict[str, str]] = []
 
-    with requests.Session() as session, output_csv.open("w", newline="") as handle:
+    with requests.Session() as session:
         with tqdm(
             total=len(entry_names),
             desc="Embedding receptors",
@@ -196,7 +293,9 @@ def coupling_map(
                 if not is_full_batch and not is_last_batch:
                     continue
 
-                batch_ids = ", ".join(row["gpcrdb_entry_name"] for row in batch_rows[:3])
+                batch_ids = ", ".join(
+                    row["gpcrdb_entry_name"] for row in batch_rows[:3]
+                )
                 if len(batch_rows) > 3:
                     batch_ids += ", ..."
 
@@ -211,23 +310,49 @@ def coupling_map(
                     device=torch_device,
                 )
 
-                if writer is None:
-                    meta = [
-                        "gpcrdb_entry_name",
-                        "uniprot_accession",
-                        "uniprot_id",
-                        "sequence_length",
-                        "n_chunks",
-                    ]
-
-                    writer = csv.DictWriter(
-                        handle,
-                        fieldnames=meta + _embedding_header(embeddings.shape[1]),
-                    )
-                    writer.writeheader()
-
-                bar.set_postfix_str("write output")
-                _write_embedding_batch(writer, batch_rows, embeddings)
+                embedding_blocks.append(np.asarray(embeddings, dtype=np.float32))
+                records.extend(batch_rows)
 
                 bar.update(len(batch_rows))
                 batch_rows = []
+
+    if not embedding_blocks:
+        raise RuntimeError("No embeddings were produced.")
+
+    X = np.vstack(embedding_blocks).astype(np.float32, copy=False)
+
+    if X.shape[0] != len(records):
+        raise RuntimeError(
+            f"Embedding row mismatch: X has {X.shape[0]} rows, "
+            f"but records has {len(records)} rows."
+        )
+
+    _write_npz(
+        output_npz,
+        records,
+        X,
+    )
+
+    audit_csv = _audit_csv_path(output_npz) if write_audit_csv else None
+    if audit_csv is not None:
+        _write_audit_csv(
+            audit_csv,
+            records,
+        )
+
+    if write_metadata_json:
+        _write_metadata_json(
+            output_npz,
+            input_csv=input_csv,
+            model_id=model_id,
+            max_residues=max_residues,
+            X=X,
+            gpcrdb_column=gpcrdb_column,
+            audit_csv=audit_csv,
+        )
+
+    typer.echo(f"Wrote embeddings: {output_npz}")
+    if audit_csv is not None:
+        typer.echo(f"Wrote audit CSV: {audit_csv}")
+    if write_metadata_json:
+        typer.echo(f"Wrote metadata JSON: {_metadata_json_path(output_npz)}")
