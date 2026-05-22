@@ -19,13 +19,27 @@ from tqdm.auto import tqdm
 import requests
 import typer
 
-from glens.models.embed_model import DEFAULT_MAX_RESIDUES, DEFAULT_MODEL_ID, embed_sequences, load_plm
+from glens.models.embed_model import (
+    DEFAULT_MAX_RESIDUES,
+    DEFAULT_MODEL_ID,
+    ResidueEmbeddingResult,
+    embed_residue_sequences,
+    load_plm,
+)
+from glens.models.embed_views import (
+    EmbeddingViews,
+    build_global_views,
+    merge_view_metadata,
+    stack_view_rows,
+)
 
 app = typer.Typer(no_args_is_help=True)
 UNIPROT_ENTRY_FASTA_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.fasta"
 UNIPROT_ENTRY_JSON_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.json"
 UNIPROT_ENTRY_RE = re.compile(r"^[a-z0-9]+_[a-z0-9]+$")
 GPCRDB_ENTRY_RE = re.compile(r"/protein/([^/?#]+)")
+GLOBAL_VIEW_NAMES = ["X_global_mean", "X_global_std", "X_global_mean_std"]
+BACKCOMPAT_EMBEDDING_KEY = "X_global_mean"
 
 
 def _clean_header(value: str) -> str:
@@ -84,8 +98,26 @@ def _parse_fasta_sequence(text: str) -> str:
         if line and not line.startswith(">")
     )
 
-def _n_chunks(sequence_length: int, max_residues: int) -> int:
-    return (sequence_length + max_residues - 1) // max_residues
+def _n_windows(sequence_length: int, max_residues: int, stride: int | None) -> int:
+    if sequence_length <= max_residues:
+        return 1
+
+    if stride is None:
+        stride = max_residues
+
+    if stride > max_residues:
+        raise ValueError("stride must be <= max_residues to avoid coverage gaps.")
+
+    if stride == max_residues:
+        return (sequence_length + max_residues - 1) // max_residues
+
+    starts = list(range(0, max(1, sequence_length - max_residues + 1), stride))
+    final_start = max(0, sequence_length - max_residues)
+
+    if starts[-1] != final_start:
+        starts.append(final_start)
+
+    return len(starts)
 
 #TODO: When constructing metadata, refactor some of this so we can grab taxon and organism
 def fetch_uniprot_sequence(
@@ -146,10 +178,16 @@ def _audit_csv_path(output_npz: Path) -> Path:
 def _write_npz(
     output_npz: Path,
     records: list[dict[str, str]],
-    X: np.ndarray,
+    view_arrays: dict[str, np.ndarray],
 ) -> None:
+    x_alias = view_arrays[BACKCOMPAT_EMBEDDING_KEY]
+
     payload = {
-        "X": X.astype(np.float32, copy=False),
+        "X": x_alias.astype(np.float32, copy=False),
+        **{
+            key: value.astype(np.float32, copy=False)
+            for key, value in view_arrays.items()
+        },
         "gpcrdb_entry_name": np.array(
             [row["gpcrdb_entry_name"] for row in records],
             dtype=str,
@@ -167,7 +205,11 @@ def _write_npz(
             dtype=np.int32,
         ),
         "n_chunks": np.array(
-            [int(row["n_chunks"]) for row in records],
+            [int(row["n_windows"]) for row in records],
+            dtype=np.int16,
+        ),
+        "n_windows": np.array(
+            [int(row["n_windows"]) for row in records],
             dtype=np.int16,
         ),
     }
@@ -181,22 +223,33 @@ def _write_metadata_json(
     input_csv: Path,
     model_id: str,
     max_residues: int,
-    X: np.ndarray,
+    stride: int | None,
+    view_arrays: dict[str, np.ndarray],
+    view_metadata: dict[str, str | int | float | list[str]],
     gpcrdb_column: str,
     audit_csv: Path | None,
 ) -> None:
+    x_alias = view_arrays[BACKCOMPAT_EMBEDDING_KEY]
+
     metadata = {
         "source_csv": str(input_csv),
         "output_npz": str(output_npz),
         "audit_csv": str(audit_csv) if audit_csv is not None else None,
         "model_id": model_id,
         "embedding_key": "X",
-        "embedding_shape": list(X.shape),
-        "embedding_dim": int(X.shape[1]),
-        "dtype": str(X.dtype),
-        "pooling": "mean_residue_tokens",
-        "chunking": "non_overlapping_length_weighted",
+        "embedding_alias_of": BACKCOMPAT_EMBEDDING_KEY,
+        "embedding_shape": list(x_alias.shape),
+        "embedding_dim": int(x_alias.shape[1]),
+        "dtype": str(x_alias.dtype),
+        "pooling": "global_views_from_reconstructed_residue_tokens",
+        "chunking": "windowed_residue_reconstruction",
         "max_residues": max_residues,
+        "stride": stride,
+        "view_shapes": {
+            key: list(value.shape)
+            for key, value in view_arrays.items()
+        },
+        "view_metadata": view_metadata,
         "gpcrdb_column": gpcrdb_column,
         "created_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
@@ -217,6 +270,7 @@ def _write_audit_csv(
         "uniprot_id",
         "sequence_length",
         "n_chunks",
+        "n_windows",
     ]
 
     with audit_csv.open("w", newline="") as handle:
@@ -225,6 +279,21 @@ def _write_audit_csv(
 
         for row in records:
             writer.writerow({field: row[field] for field in fieldnames})
+
+
+def _stack_view_blocks(view_blocks: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    if not view_blocks:
+        raise RuntimeError("No embedding view blocks were produced.")
+
+    keys = list(view_blocks[0].keys())
+
+    return {
+        key: np.vstack([block[key] for block in view_blocks]).astype(
+            np.float32,
+            copy=False,
+        )
+        for key in keys
+    }
 
 
 #TODO: Change output artifact from csv to npz for ml flow
@@ -236,11 +305,16 @@ def coupling_map(
     model_id: str = typer.Option(DEFAULT_MODEL_ID, help="Hugging Face ESM-2 model id."),
     batch_size: int = typer.Option(8, min=1, help="Sequences per embedding batch."),
     device: str = typer.Option("auto", help="auto, cuda, mps, or cpu."),
-    max_residues: int = typer.Option(DEFAULT_MAX_RESIDUES, min=1, help="Maximum residues accepted by the model."), # is this even useful?
+    max_residues: int = typer.Option(DEFAULT_MAX_RESIDUES, min=1, help="Maximum residues accepted by the model."),
+    stride: int | None = typer.Option(
+        None,
+        min=1,
+        help="Window stride for residue reconstruction. Default none means non-overlapping windows.",
+    ),
     write_audit_csv: bool = typer.Option(
-    True,
-    "--audit/--no-audit",
-    help="Write a small output audit CSV, containing protein entry name, uniprot accession and id, and number of embedding chunks.",
+        True,
+        "--audit/--no-audit",
+        help="Write a small output audit CSV, containing protein entry name, uniprot accession and id, and number of embedding chunks.",
     ),
     write_metadata_json: bool = typer.Option(
         True,
@@ -268,7 +342,8 @@ def coupling_map(
     typer.echo(f"Embedding {len(entry_names)} unique receptors on {torch_device}.")
 
     records: list[dict[str, str]] = []
-    embedding_blocks: list[np.ndarray] = []
+    view_blocks: list[dict[str, np.ndarray]] = []
+    view_rows: list[EmbeddingViews] = []
     batch_rows: list[dict[str, str]] = []
 
     with requests.Session() as session:
@@ -283,8 +358,11 @@ def coupling_map(
 
                 row = fetch_uniprot_sequence(entry_name, session)
                 sequence_length = len(row["sequence"])
+                n_windows = _n_windows(sequence_length, max_residues, stride)
+
                 row["sequence_length"] = str(sequence_length)
-                row["n_chunks"] = str(_n_chunks(sequence_length, max_residues))
+                row["n_windows"] = str(n_windows)
+                row["n_chunks"] = str(n_windows)  # backward-compatible audit name
 
                 batch_rows.append(row)
 
@@ -301,37 +379,41 @@ def coupling_map(
 
                 bar.set_postfix_str(f"embed batch: {batch_ids}")
 
-                embeddings = embed_sequences(
+                residue_results = embed_residue_sequences(
                     (row["sequence"] for row in batch_rows),
                     tokenizer,
                     model,
                     batch_size=batch_size,
                     max_residues=max_residues,
+                    stride=stride,
                     device=torch_device,
                 )
 
-                embedding_blocks.append(np.asarray(embeddings, dtype=np.float32))
+                if isinstance(residue_results, ResidueEmbeddingResult):
+                    residue_results = [residue_results]
+
+                batch_views = [
+                    build_global_views(result)
+                    for result in residue_results
+                ]
+
+                view_blocks.append(stack_view_rows(batch_views, GLOBAL_VIEW_NAMES))
+                view_rows.extend(batch_views)
                 records.extend(batch_rows)
 
                 bar.update(len(batch_rows))
                 batch_rows = []
 
-    if not embedding_blocks:
-        raise RuntimeError("No embeddings were produced.")
+    view_arrays = _stack_view_blocks(view_blocks)
+    x_alias = view_arrays[BACKCOMPAT_EMBEDDING_KEY]
 
-    X = np.vstack(embedding_blocks).astype(np.float32, copy=False)
-
-    if X.shape[0] != len(records):
+    if x_alias.shape[0] != len(records):
         raise RuntimeError(
-            f"Embedding row mismatch: X has {X.shape[0]} rows, "
+            f"Embedding row mismatch: X has {x_alias.shape[0]} rows, "
             f"but records has {len(records)} rows."
         )
 
-    _write_npz(
-        output_npz,
-        records,
-        X,
-    )
+    _write_npz(output_npz, records, view_arrays)
 
     audit_csv = _audit_csv_path(output_npz) if write_audit_csv else None
     if audit_csv is not None:
@@ -340,16 +422,17 @@ def coupling_map(
             records,
         )
 
-    if write_metadata_json:
-        _write_metadata_json(
-            output_npz,
-            input_csv=input_csv,
-            model_id=model_id,
-            max_residues=max_residues,
-            X=X,
-            gpcrdb_column=gpcrdb_column,
-            audit_csv=audit_csv,
-        )
+    _write_metadata_json(
+        output_npz,
+        input_csv=input_csv,
+        model_id=model_id,
+        max_residues=max_residues,
+        stride=stride,
+        view_arrays=view_arrays,
+        view_metadata=merge_view_metadata(view_rows),
+        gpcrdb_column=gpcrdb_column,
+        audit_csv=audit_csv,
+    )
 
     typer.echo(f"Wrote embeddings: {output_npz}")
     if audit_csv is not None:

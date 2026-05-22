@@ -195,13 +195,28 @@ def build_family_targets(
     )
 
 
-def load_embedding_artifact(path: Path) -> dict[str, np.ndarray]:
+def load_embedding_artifact(
+    path: Path,
+    *,
+    embedding_key: str = "X",
+) -> dict[str, np.ndarray]:
     data = np.load(path, allow_pickle=False)
-    required = {"X", "gpcrdb_entry_name"}
+
+    required = {embedding_key, "gpcrdb_entry_name"}
     missing = required.difference(data.files)
     if missing:
-        raise ValueError(f"Embedding artifact missing keys: {sorted(missing)}")
-    return {key: data[key] for key in data.files}
+        available = ", ".join(data.files)
+        raise ValueError(
+            f"Embedding artifact missing keys: {sorted(missing)}. "
+            f"Available keys: {available}"
+        )
+
+    payload = {key: data[key] for key in data.files}
+
+    # Fix the selected view to the key used downstream.
+    payload["X"] = data[embedding_key]
+
+    return payload
 
 
 def join_embeddings_to_targets(
@@ -623,6 +638,11 @@ def family(
     embeddings_npz: Path = typer.Argument(..., help="Canonical ESM embedding artifact NPZ."),
     coupling_map_csv: Path = typer.Argument(..., help="GPCR common coupling map CSV."),
     model_out: Path = typer.Argument(..., help="Output .joblib model path."),
+    embedding_key: str = typer.Option(
+        "X",
+        "--embedding-key",
+        help="NPZ key to use as model features, e.g. X, X_global_mean, X_global_mean_std.",
+    ),
     predictions_csv: Path = typer.Option(
         Path("reports/family_ridgecv.predictions.csv"),
         help="Output CSV with cross-validated labeled predictions.",
@@ -663,7 +683,7 @@ def family(
     ridge_mode: RidgeMode = typer.Option(
         RidgeMode.SHARED_ALPHA,
         "--ridge-mode",
-        help="Ridge strategy: shared_alpha, alpha_per_target, or independent_targets.",
+        help="Ridge strategy: shared_alpha, alpha_per_target, or independent_targets.", #alpha-per-target should prob be default but need to investigate
     ),
     clip_predictions: bool = typer.Option(
         True,
@@ -672,7 +692,10 @@ def family(
     ),
 ) -> None:
     """Fit the first family-level continuous selectivity baseline."""
-    embeddings = load_embedding_artifact(embeddings_npz)
+    embeddings = load_embedding_artifact(
+        embeddings_npz,
+        embedding_key=embedding_key,
+    )
     targets = build_family_targets(coupling_map_csv)
 
     if targets_npz is not None:
@@ -728,6 +751,8 @@ def family(
             ),
             "cv_group_summary": cv_group_summary,
             "random_state": random_state if cv_strategy == CVStrategy.KFOLD else None,
+            "embedding_key": embedding_key,
+            "embedding_dim": int(embeddings["X"].shape[1]),
             "n_embedding_rows": int(embeddings["X"].shape[0]),
             "n_family_target_rows": int(targets.y.shape[0]),
             "n_complete_case_rows_before_zero_filter": int(complete_table.X.shape[0]),
@@ -778,6 +803,8 @@ def family(
             "target_source": targets.label_source,
             "target_transform": "% of 1' G protein family / 100; no softmax; no row normalization",
             "exclude_zero_targets": bool(exclude_zero_targets),
+            "embedding_key": embedding_key,
+            "embedding_dim": int(embeddings["X"].shape[1]),
         },
         model_out,
     )
