@@ -2,6 +2,7 @@ import typer
 
 from .. import __version__
 from ..models.batch_embed import app as batch_embed_app
+from ..models.family_blockwise_fit import family_blockwise
 from ..models.family_fit import app as family_fit_app
 from ..models.regions import app as regions_app
 
@@ -13,6 +14,11 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+
+family_fit_app.command(
+    "family-blockwise",
+    help="Fit RidgeCV on fold-local blockwise PCA/SVD region features.",
+)(family_blockwise)
 
 # Nest tools inside main CLI entry point here:
 app.add_typer(batch_embed_app, name="embed", help="Batch embed a list of amino-acid sequences")
