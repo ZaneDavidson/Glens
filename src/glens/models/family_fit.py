@@ -20,6 +20,7 @@ import joblib
 import numpy as np
 import typer
 from sklearn.base import clone
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold, KFold
@@ -49,6 +50,12 @@ class RidgeMode(str, Enum):
     SHARED_ALPHA = "shared_alpha"
     ALPHA_PER_TARGET = "alpha_per_target"
     INDEPENDENT_TARGETS = "independent_targets"
+
+
+class ReducerKind(str, Enum):
+    NONE = "none"
+    PCA = "pca"
+    TRUNCATED_SVD = "truncated_svd"
 
 
 @dataclass(frozen=True)
@@ -401,7 +408,58 @@ def _write_training_table_npz(path: Path, table: JoinedFamilyTable) -> None:
     )
 
 
-def _make_model(alphas: Sequence[float], ridge_mode: RidgeMode) -> Any:
+def _make_reducer(
+    *,
+    reducer: ReducerKind,
+    reducer_components: int | None,
+    random_state: int,
+    svd_n_iter: int,
+) -> Any | None:
+    if reducer == ReducerKind.NONE:
+        if reducer_components is not None:
+            raise ValueError(
+                "--reducer-components should only be passed when "
+                "--reducer is pca or truncated_svd."
+            )
+        return None
+
+    if reducer_components is None:
+        raise ValueError(
+            "--reducer-components is required when --reducer is "
+            "pca or truncated_svd."
+        )
+
+    if reducer_components <= 0:
+        raise ValueError("--reducer-components must be positive.")
+
+    if reducer == ReducerKind.PCA:
+        return PCA(
+            n_components=reducer_components,
+            svd_solver="randomized",
+            random_state=random_state,
+        )
+
+    if reducer == ReducerKind.TRUNCATED_SVD:
+        return TruncatedSVD(
+            n_components=reducer_components,
+            algorithm="randomized",
+            n_iter=svd_n_iter,
+            random_state=random_state,
+        )
+
+    raise ValueError(f"Unsupported reducer: {reducer}")
+
+
+def _make_model(
+    alphas: Sequence[float],
+    *,
+    ridge_mode: RidgeMode,
+    reducer: ReducerKind,
+    reducer_components: int | None,
+    random_state: int,
+    svd_n_iter: int,
+    scale_reduced: bool,
+) -> Any:
     alpha_grid = np.array(alphas, dtype=np.float64)
 
     if ridge_mode == RidgeMode.SHARED_ALPHA:
@@ -413,7 +471,24 @@ def _make_model(alphas: Sequence[float], ridge_mode: RidgeMode) -> Any:
     else:
         raise ValueError(f"Unsupported ridge mode: {ridge_mode}")
 
-    return make_pipeline(StandardScaler(), regressor)
+    reducer_step = _make_reducer(
+        reducer=reducer,
+        reducer_components=reducer_components,
+        random_state=random_state,
+        svd_n_iter=svd_n_iter,
+    )
+
+    steps: list[Any] = [StandardScaler()]
+
+    if reducer_step is not None:
+        steps.append(reducer_step)
+
+        if scale_reduced:
+            steps.append(StandardScaler())
+
+    steps.append(regressor)
+
+    return make_pipeline(*steps)
 
 
 def _cv_group_values(table: JoinedFamilyTable, group_by: CVGroup) -> np.ndarray:
@@ -467,6 +542,43 @@ def _make_cv_splitter(
         )
 
     return GroupKFold(n_splits=cv_splits), groups, group_summary
+
+
+def _validate_reducer_components(
+    *,
+    reducer: ReducerKind,
+    reducer_components: int | None,
+    table: JoinedFamilyTable,
+    splits: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> dict[str, Any] | None:
+    if reducer == ReducerKind.NONE:
+        return None
+
+    if reducer_components is None:
+        raise ValueError(
+            "--reducer-components is required when --reducer is "
+            "pca or truncated_svd."
+        )
+
+    min_train_rows = min(int(train_idx.size) for train_idx, _ in splits)
+    n_features = int(table.X.shape[1])
+    max_safe_components = min(min_train_rows - 1, n_features)
+
+    if reducer_components > max_safe_components:
+        raise ValueError(
+            f"--reducer-components={reducer_components} is too large for "
+            f"{reducer.value} with the current CV splits. The smallest training "
+            f"fold has {min_train_rows} rows and X has {n_features} features; "
+            f"use <= {max_safe_components}."
+        )
+
+    return {
+        "reducer": reducer.value,
+        "reducer_components": int(reducer_components),
+        "min_train_rows": int(min_train_rows),
+        "n_features_before_reducer": int(n_features),
+        "max_safe_components": int(max_safe_components),
+    }
 
 
 def _category_mean_predictions(
@@ -633,6 +745,43 @@ def _selected_alphas(fitted_model: Any) -> Any:
     return None
 
 
+def _selected_reducer_summary(fitted_model: Any) -> dict[str, Any] | None:
+    for step in fitted_model:
+        if isinstance(step, (PCA, TruncatedSVD)):
+            explained = getattr(step, "explained_variance_ratio_", None)
+            singular_values = getattr(step, "singular_values_", None)
+
+            summary: dict[str, Any] = {
+                "kind": (
+                    "pca"
+                    if isinstance(step, PCA)
+                    else "truncated_svd"
+                ),
+                "n_components_fitted": int(step.components_.shape[0]),
+                "explained_variance_ratio_sum": (
+                    float(np.sum(explained))
+                    if explained is not None
+                    else None
+                ),
+            }
+
+            if explained is not None:
+                summary["explained_variance_ratio_head"] = [
+                    float(value)
+                    for value in explained[:10]
+                ]
+
+            if singular_values is not None:
+                summary["singular_values_head"] = [
+                    float(value)
+                    for value in singular_values[:10]
+                ]
+
+            return summary
+
+    return None
+
+
 @app.command()
 def family(
     embeddings_npz: Path = typer.Argument(..., help="Canonical ESM embedding artifact NPZ."),
@@ -685,6 +834,30 @@ def family(
         "--ridge-mode",
         help="Ridge strategy: shared_alpha, alpha_per_target, or independent_targets.", #alpha-per-target should prob be default but need to investigate
     ),
+    reducer: ReducerKind = typer.Option(
+        ReducerKind.NONE,
+        "--reducer",
+        help="Optional feature reducer: none, pca, or truncated_svd.",
+    ),
+    reducer_components: int | None = typer.Option(
+        None,
+        "--reducer-components",
+        help="Number of PCA/SVD components. Required unless --reducer none.",
+    ),
+    scale_reduced: bool = typer.Option(
+        False,
+        "--scale-reduced/--no-scale-reduced",
+        help=(
+            "Standardize reduced PCA/SVD components before ridge. "
+            "Off by default because it changes the PCA/SVD variance weighting."
+        ),
+    ),
+    svd_n_iter: int = typer.Option(
+        7,
+        "--svd-n-iter",
+        min=1,
+        help="Power iterations for randomized TruncatedSVD.",
+    ),
     clip_predictions: bool = typer.Option(
         True,
         "--clip/--no-clip",
@@ -719,7 +892,6 @@ def family(
             f"got {train_table.X.shape[0]}."
         )
 
-    model = _make_model(DEFAULT_ALPHAS, ridge_mode=ridge_mode)
     cv, cv_groups, cv_group_summary = _make_cv_splitter(
         cv_strategy=cv_strategy,
         cv_splits=cv_splits,
@@ -728,6 +900,23 @@ def family(
         group_by=group_by,
     )
     splits = list(cv.split(train_table.X, train_table.y, groups=cv_groups))
+
+    reducer_cv_summary = _validate_reducer_components(
+        reducer=reducer,
+        reducer_components=reducer_components,
+        table=train_table,
+        splits=splits,
+    )
+
+    model = _make_model(
+        DEFAULT_ALPHAS,
+        ridge_mode=ridge_mode,
+        reducer=reducer,
+        reducer_components=reducer_components,
+        random_state=random_state,
+        svd_n_iter=svd_n_iter,
+        scale_reduced=scale_reduced,
+    )
 
     cv_result = _cross_val_predict_with_diagnostics(
         model=model,
@@ -741,8 +930,29 @@ def family(
     metrics.update(
         {
             "created_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "model": "StandardScaler + RidgeCV",
+            "model": (
+                "StandardScaler + RidgeCV"
+                if reducer == ReducerKind.NONE
+                else (
+                    f"StandardScaler + {reducer.value}"
+                    f"{' + StandardScaler' if scale_reduced else ''}"
+                    " + RidgeCV"
+                )
+            ),
             "ridge_mode": ridge_mode.value,
+            "reducer": reducer.value,
+            "reducer_components": (
+                int(reducer_components)
+                if reducer_components is not None
+                else None
+            ),
+            "scale_reduced": bool(scale_reduced),
+            "reducer_cv_summary": reducer_cv_summary,
+            "svd_n_iter": (
+                int(svd_n_iter)
+                if reducer == ReducerKind.TRUNCATED_SVD
+                else None
+            ),
             "alphas": list(DEFAULT_ALPHAS),
             "cv_splits": cv_splits,
             "cv_strategy": cv_strategy.value,
@@ -792,6 +1002,7 @@ def family(
     # Fit final model on all selected complete labeled rows.
     model.fit(train_table.X, train_table.y)
     selected_alphas = _selected_alphas(model)
+    selected_reducer_summary = _selected_reducer_summary(model)
 
     model_out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
@@ -800,6 +1011,14 @@ def family(
             "family_names": FAMILY_NAMES,
             "ridge_mode": ridge_mode.value,
             "selected_alphas": selected_alphas,
+            "reducer": reducer.value,
+            "reducer_components": (
+                int(reducer_components)
+                if reducer_components is not None
+                else None
+            ),
+            "scale_reduced": bool(scale_reduced),
+            "selected_reducer_summary": selected_reducer_summary,
             "target_source": targets.label_source,
             "target_transform": "% of 1' G protein family / 100; no softmax; no row normalization",
             "exclude_zero_targets": bool(exclude_zero_targets),
@@ -818,12 +1037,17 @@ def family(
     )
 
     metrics["selected_alphas_final_model"] = selected_alphas
+    metrics["selected_reducer_final_model"] = selected_reducer_summary
     metrics_json.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
 
     typer.echo(f"Labeled training rows: {train_table.X.shape[0]}")
     typer.echo(f"Excluded zero-target rows: {n_zero_target_rows_excluded}")
     typer.echo(f"CV strategy: {cv_strategy.value}")
     typer.echo(f"Ridge mode: {ridge_mode.value}")
+    typer.echo(f"Reducer: {reducer.value}")
+    if reducer_components is not None:
+        typer.echo(f"Reducer components: {reducer_components}")
+    typer.echo(f"Scale reduced components: {scale_reduced}")
     typer.echo(f"Wrote model: {model_out}")
     typer.echo(f"Wrote metrics: {metrics_json}")
     typer.echo(f"Wrote labeled CV predictions: {predictions_csv}")

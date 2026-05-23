@@ -31,6 +31,9 @@ REGION_VIEW_NAMES = [
     "X_h8_mean",
     "X_coupling_face_mean",
 
+    # Small scalar diagnostic feature view.
+    "X_region_count_features",
+
     # Concat views.
     "X_tm_cyt_concat",
     "X_loop_concat",
@@ -40,7 +43,31 @@ REGION_VIEW_NAMES = [
     "X_tm3_tm5_icl2_h8_concat",
     "X_tm3_tm5_icl2_loop_concat",
 
+    # Count-augmented concat views.
+    "X_tm3_tm5_icl2_plus_counts",
+    "X_tm3_tm5_tm6_icl2_plus_counts",
+    "X_tm3_tm5_icl2_h8_plus_counts",
+    "X_tm3_tm5_icl2_loop_plus_counts",
+    "X_coupling_face_concat_plus_counts",
+
     "X_region_concat",
+]
+
+REGION_COUNT_FEATURE_VIEW = "X_region_count_features"
+
+REGION_COUNT_FEATURE_REGIONS = [
+    "tm3_cyt",
+    "tm5_cyt",
+    "tm6_cyt",
+    "tm7_cyt",
+    "ICL2",
+    "ICL3",
+    "H8",
+]
+
+REGION_COUNT_FEATURE_NAMES = [
+    *(f"log1p_count:{region}" for region in REGION_COUNT_FEATURE_REGIONS),
+    *(f"missing:{region}" for region in REGION_COUNT_FEATURE_REGIONS),
 ]
 
 CONCAT_VIEW_COMPONENTS: dict[str, list[str]] = {
@@ -90,6 +117,28 @@ CONCAT_VIEW_COMPONENTS: dict[str, list[str]] = {
         "X_icl2_mean",
         "X_icl3_mean",
         "X_h8_mean",
+    ],
+
+    # Count-augmented views.
+    "X_tm3_tm5_icl2_plus_counts": [
+        "X_tm3_tm5_icl2_concat",
+        REGION_COUNT_FEATURE_VIEW,
+    ],
+    "X_tm3_tm5_tm6_icl2_plus_counts": [
+        "X_tm3_tm5_tm6_icl2_concat",
+        REGION_COUNT_FEATURE_VIEW,
+    ],
+    "X_tm3_tm5_icl2_h8_plus_counts": [
+        "X_tm3_tm5_icl2_h8_concat",
+        REGION_COUNT_FEATURE_VIEW,
+    ],
+    "X_tm3_tm5_icl2_loop_plus_counts": [
+        "X_tm3_tm5_icl2_loop_concat",
+        REGION_COUNT_FEATURE_VIEW,
+    ],
+    "X_coupling_face_concat_plus_counts": [
+        "X_coupling_face_concat",
+        REGION_COUNT_FEATURE_VIEW,
     ],
 }
 
@@ -174,6 +223,24 @@ def _concat_arrays(arrays: dict[str, np.ndarray], components: list[str]) -> np.n
     )
 
 
+def _region_count_features(residue_counts: dict[str, int]) -> np.ndarray:
+    counts = np.array(
+        [
+            float(residue_counts.get(region, 0))
+            for region in REGION_COUNT_FEATURE_REGIONS
+        ],
+        dtype=np.float32,
+    )
+
+    log_counts = np.log1p(counts).astype(np.float32, copy=False)
+    missing = (counts == 0).astype(np.float32, copy=False)
+
+    return np.concatenate([log_counts, missing]).astype(
+        np.float32,
+        copy=False,
+    )
+
+
 def weighted_pool(
     residue_embeddings: np.ndarray,
     weights: np.ndarray,
@@ -188,7 +255,7 @@ def weighted_pool(
     total = float(weights.sum())
 
     if total <= 0:
-        raise ValueError("Cannot weighted-pool with non-positive total weight.")
+        raise ValueError("Cannot weighted-pool with a non-positive total weight.")
 
     return (
         (residue_embeddings * weights[:, None]).sum(axis=0) / total
@@ -228,7 +295,7 @@ def build_region_views(
     """Build fixed-size region-aware views from residue embeddings and masks.
 
     Empty/missing regions are represented by zero vectors and recorded in
-    metadata. This keeps NPZ shapes rectangular while making missingness auditable.
+    metadata.
     """
     if masks.sequence_length != result.residue_embeddings.shape[0]:
         raise ValueError(
@@ -252,6 +319,8 @@ def build_region_views(
         if missing:
             missing_view_names.append(view_name)
             missing_region_names.append(mask_name)
+
+    arrays[REGION_COUNT_FEATURE_VIEW] = _region_count_features(residue_counts)
 
     for view_name, components in CONCAT_VIEW_COMPONENTS.items():
         arrays[view_name] = _concat_arrays(arrays, components)
@@ -279,6 +348,8 @@ def build_region_views(
             for name, components in CONCAT_VIEW_COMPONENTS.items()
         },
         "region_concat_components": list(REGION_CONCAT_COMPONENTS),
+        "region_count_feature_regions": list(REGION_COUNT_FEATURE_REGIONS),
+        "region_count_feature_names": list(REGION_COUNT_FEATURE_NAMES),
         "missing_region_names": missing_region_names,
         "missing_view_names": missing_view_names,
         "region_residue_counts": residue_counts,
@@ -319,6 +390,8 @@ def merge_views(*views: EmbeddingViews) -> EmbeddingViews:
             "region_residue_counts",
             "concat_view_components",
             "region_concat_components",
+            "region_count_feature_regions",
+            "region_count_feature_names",
             "region_source",
         ):
             if key in view.metadata:
@@ -372,6 +445,8 @@ def merge_view_metadata(
     component_metadata_keys = (
         "concat_view_components",
         "region_concat_components",
+        "region_count_feature_regions",
+        "region_count_feature_names",
     )
 
     component_metadata: dict[str, object] = {}
