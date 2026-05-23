@@ -25,39 +25,73 @@ REGION_VIEW_NAMES = [
     "X_tm5_cyt_mean",
     "X_tm6_cyt_mean",
     "X_tm7_cyt_mean",
-    "X_tm_cyt_concat",
     "X_icl_mean",
     "X_icl2_mean",
     "X_icl3_mean",
     "X_h8_mean",
-    "X_loop_concat",
     "X_coupling_face_mean",
+
+    # Concat views.
+    "X_tm_cyt_concat",
+    "X_loop_concat",
     "X_coupling_face_concat",
+    "X_tm3_tm5_icl2_concat",
+    "X_tm3_tm5_tm6_icl2_concat",
+    "X_tm3_tm5_icl2_h8_concat",
+    "X_tm3_tm5_icl2_loop_concat",
+
     "X_region_concat",
 ]
 
-TM_CYT_CONCAT_COMPONENTS = [
-    "X_tm3_cyt_mean",
-    "X_tm5_cyt_mean",
-    "X_tm6_cyt_mean",
-    "X_tm7_cyt_mean",
-]
+CONCAT_VIEW_COMPONENTS: dict[str, list[str]] = {
+    # Broad concat views.
+    "X_tm_cyt_concat": [
+        "X_tm3_cyt_mean",
+        "X_tm5_cyt_mean",
+        "X_tm6_cyt_mean",
+        "X_tm7_cyt_mean",
+    ],
+    "X_loop_concat": [
+        "X_icl2_mean",
+        "X_icl3_mean",
+        "X_h8_mean",
+    ],
+    "X_coupling_face_concat": [
+        "X_tm3_cyt_mean",
+        "X_tm5_cyt_mean",
+        "X_tm6_cyt_mean",
+        "X_tm7_cyt_mean",
+        "X_icl2_mean",
+        "X_icl3_mean",
+        "X_h8_mean",
+    ],
 
-LOOP_CONCAT_COMPONENTS = [
-    "X_icl2_mean",
-    "X_icl3_mean",
-    "X_h8_mean",
-]
-
-COUPLING_FACE_CONCAT_COMPONENTS = [
-    "X_tm3_cyt_mean",
-    "X_tm5_cyt_mean",
-    "X_tm6_cyt_mean",
-    "X_tm7_cyt_mean",
-    "X_icl2_mean",
-    "X_icl3_mean",
-    "X_h8_mean",
-]
+    # Targeted subset views.
+    "X_tm3_tm5_icl2_concat": [
+        "X_tm3_cyt_mean",
+        "X_tm5_cyt_mean",
+        "X_icl2_mean",
+    ],
+    "X_tm3_tm5_tm6_icl2_concat": [
+        "X_tm3_cyt_mean",
+        "X_tm5_cyt_mean",
+        "X_tm6_cyt_mean",
+        "X_icl2_mean",
+    ],
+    "X_tm3_tm5_icl2_h8_concat": [
+        "X_tm3_cyt_mean",
+        "X_tm5_cyt_mean",
+        "X_icl2_mean",
+        "X_h8_mean",
+    ],
+    "X_tm3_tm5_icl2_loop_concat": [
+        "X_tm3_cyt_mean",
+        "X_tm5_cyt_mean",
+        "X_icl2_mean",
+        "X_icl3_mean",
+        "X_h8_mean",
+    ],
+}
 
 REGION_CONCAT_COMPONENTS = [
     "X_global_mean",
@@ -219,12 +253,8 @@ def build_region_views(
             missing_view_names.append(view_name)
             missing_region_names.append(mask_name)
 
-    arrays["X_tm_cyt_concat"] = _concat_arrays(arrays, TM_CYT_CONCAT_COMPONENTS)
-    arrays["X_loop_concat"] = _concat_arrays(arrays, LOOP_CONCAT_COMPONENTS)
-    arrays["X_coupling_face_concat"] = _concat_arrays(
-        arrays,
-        COUPLING_FACE_CONCAT_COMPONENTS,
-    )
+    for view_name, components in CONCAT_VIEW_COMPONENTS.items():
+        arrays[view_name] = _concat_arrays(arrays, components)
 
     region_concat_parts: list[np.ndarray] = []
     for component in REGION_CONCAT_COMPONENTS:
@@ -244,9 +274,10 @@ def build_region_views(
         "sequence_length": int(result.residue_embeddings.shape[0]),
         "embedding_dim": int(result.residue_embeddings.shape[1]),
         "region_view_names": list(REGION_VIEW_NAMES),
-        "tm_cyt_concat_components": list(TM_CYT_CONCAT_COMPONENTS),
-        "loop_concat_components": list(LOOP_CONCAT_COMPONENTS),
-        "coupling_face_concat_components": list(COUPLING_FACE_CONCAT_COMPONENTS),
+        "concat_view_components": {
+            name: list(components)
+            for name, components in CONCAT_VIEW_COMPONENTS.items()
+        },
         "region_concat_components": list(REGION_CONCAT_COMPONENTS),
         "missing_region_names": missing_region_names,
         "missing_view_names": missing_view_names,
@@ -286,9 +317,7 @@ def merge_views(*views: EmbeddingViews) -> EmbeddingViews:
             "missing_region_names",
             "missing_view_names",
             "region_residue_counts",
-            "tm_cyt_concat_components",
-            "loop_concat_components",
-            "coupling_face_concat_components",
+            "concat_view_components",
             "region_concat_components",
             "region_source",
         ):
@@ -341,13 +370,11 @@ def merge_view_metadata(
     region_missing_counts: dict[str, int] = {}
 
     component_metadata_keys = (
-        "tm_cyt_concat_components",
-        "loop_concat_components",
-        "coupling_face_concat_components",
+        "concat_view_components",
         "region_concat_components",
     )
 
-    component_metadata: dict[str, list[str]] = {}
+    component_metadata: dict[str, object] = {}
 
     for view in per_receptor_views:
         builder = view.metadata.get("view_builder", "unknown")
@@ -377,8 +404,15 @@ def merge_view_metadata(
 
         for key in component_metadata_keys:
             value = view.metadata.get(key)
+
             if isinstance(value, list) and key not in component_metadata:
                 component_metadata[key] = [str(item) for item in value]
+
+            elif isinstance(value, dict) and key not in component_metadata:
+                component_metadata[key] = {
+                    str(name): [str(item) for item in components]
+                    for name, components in value.items()
+                }
 
     metadata: dict[str, object] = {
         "view_builders": sorted(set(view_builders)),

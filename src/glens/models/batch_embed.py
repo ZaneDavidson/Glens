@@ -47,6 +47,15 @@ UNIPROT_ENTRY_JSON_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.json"
 UNIPROT_ENTRY_RE = re.compile(r"^[a-z0-9]+_[a-z0-9]+$")
 GPCRDB_ENTRY_RE = re.compile(r"/protein/([^/?#]+)")
 BACKCOMPAT_EMBEDDING_KEY = "X_global_mean"
+PROGRESS_STATUS_WIDTH = 42
+
+
+def _progress_status(text: str, width: int = PROGRESS_STATUS_WIDTH) -> str:
+    # fix bar jitter via trunc
+    text = text.replace("\n", " ")
+    if len(text) > width:
+        text = text[: width - 1] + "…"
+    return f"{text:<{width}}"
 
 
 def _clean_header(value: str) -> str:
@@ -437,10 +446,15 @@ def coupling_map(
             total=len(entry_names),
             desc="Embedding receptors",
             unit="receptor",
-            dynamic_ncols=True,
+            dynamic_ncols=False,
+            ncols=118,
+            bar_format=(
+                "{desc}: {percentage:3.0f}%|{bar:32}| "
+                "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+            ),
         ) as bar:
             for idx, entry_name in enumerate(entry_names, start=1):
-                bar.set_postfix_str(f"fetch {entry_name}")
+                bar.set_postfix_str(_progress_status(f"fetch {entry_name}"))
 
                 row = fetch_uniprot_sequence(entry_name, session)
                 sequence_length = len(row["sequence"])
@@ -463,7 +477,7 @@ def coupling_map(
                 if len(batch_rows) > 3:
                     batch_ids += ", ..."
 
-                bar.set_postfix_str(f"embed batch: {batch_ids}")
+                bar.set_postfix_str(_progress_status(f"embed batch: {batch_ids}"))
 
                 residue_results = embed_residue_sequences(
                     (row["sequence"] for row in batch_rows),
