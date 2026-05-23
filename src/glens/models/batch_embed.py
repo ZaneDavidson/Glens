@@ -2,22 +2,21 @@
 Typer CLI for embedding unique GPCRs from GPCRdb common coupling map.
 """
 
-#TODO: I want to make this less GPCRdb facing. Yes, that is where data is ingested now but
+# TODO: I want to make this less GPCRdb facing. Yes, that is where data is ingested now but
 # what about new assays? Needs functionality for embedding just from a UniProt accession list.
 
 import csv
 import json
 import re
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime
-
-import numpy as np
-from collections.abc import Iterable, Iterator
 from itertools import chain
 from pathlib import Path
-from tqdm.auto import tqdm
 
+import numpy as np
 import requests
 import typer
+from tqdm.auto import tqdm
 
 from glens.models.embed_model import (
     DEFAULT_MAX_RESIDUES,
@@ -29,8 +28,17 @@ from glens.models.embed_model import (
 from glens.models.embed_views import (
     EmbeddingViews,
     build_global_views,
+    build_region_views,
     merge_view_metadata,
+    merge_views,
     stack_view_rows,
+)
+from glens.models.regions import (
+    RegionMasks,
+    empty_region_masks,
+    load_region_cache,
+    reconcile_length_arguments,
+    validate_region_masks,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -38,7 +46,6 @@ UNIPROT_ENTRY_FASTA_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.fasta"
 UNIPROT_ENTRY_JSON_URL = "https://rest.uniprot.org/uniprotkb/{entry_id}.json"
 UNIPROT_ENTRY_RE = re.compile(r"^[a-z0-9]+_[a-z0-9]+$")
 GPCRDB_ENTRY_RE = re.compile(r"/protein/([^/?#]+)")
-GLOBAL_VIEW_NAMES = ["X_global_mean", "X_global_std", "X_global_mean_std"]
 BACKCOMPAT_EMBEDDING_KEY = "X_global_mean"
 
 
@@ -82,7 +89,7 @@ def _iter_gpcrdb_entry_names(path: Path, column: str = "GPCRdb") -> Iterator[str
             match = GPCRDB_ENTRY_RE.search(value)
             entry_name = (match.group(1) if match else value).strip().lower()
 
-            if not UNIPROT_ENTRY_RE.match(entry_name): # Skip malformed rows
+            if not UNIPROT_ENTRY_RE.match(entry_name):  # Skip malformed rows
                 continue
 
             if entry_name in seen:
@@ -91,12 +98,14 @@ def _iter_gpcrdb_entry_names(path: Path, column: str = "GPCRdb") -> Iterator[str
             seen.add(entry_name)
             yield entry_name
 
+
 def _parse_fasta_sequence(text: str) -> str:
     return "".join(
         line.strip()
         for line in text.splitlines()
         if line and not line.startswith(">")
     )
+
 
 def _n_windows(sequence_length: int, max_residues: int, stride: int | None) -> int:
     if sequence_length <= max_residues:
@@ -119,7 +128,8 @@ def _n_windows(sequence_length: int, max_residues: int, stride: int | None) -> i
 
     return len(starts)
 
-#TODO: When constructing metadata, refactor some of this so we can grab taxon and organism
+
+# TODO: When constructing metadata, refactor some of this so we can grab taxon and organism
 def fetch_uniprot_sequence(
     entry_name: str,
     session: requests.Session,
@@ -179,6 +189,8 @@ def _write_npz(
     output_npz: Path,
     records: list[dict[str, str]],
     view_arrays: dict[str, np.ndarray],
+    *,
+    extra_arrays: dict[str, np.ndarray] | None = None,
 ) -> None:
     x_alias = view_arrays[BACKCOMPAT_EMBEDDING_KEY]
 
@@ -214,6 +226,9 @@ def _write_npz(
         ),
     }
 
+    if extra_arrays is not None:
+        payload.update(extra_arrays)
+
     np.savez_compressed(output_npz, **payload)
 
 
@@ -225,9 +240,10 @@ def _write_metadata_json(
     max_residues: int,
     stride: int | None,
     view_arrays: dict[str, np.ndarray],
-    view_metadata: dict[str, str | int | float | list[str]],
+    view_metadata: dict[str, object],
     gpcrdb_column: str,
     audit_csv: Path | None,
+    region_mask_json: Path | None,
 ) -> None:
     x_alias = view_arrays[BACKCOMPAT_EMBEDDING_KEY]
 
@@ -241,7 +257,7 @@ def _write_metadata_json(
         "embedding_shape": list(x_alias.shape),
         "embedding_dim": int(x_alias.shape[1]),
         "dtype": str(x_alias.dtype),
-        "pooling": "global_views_from_reconstructed_residue_tokens",
+        "pooling": "global_and_region_views_from_reconstructed_residue_tokens",
         "chunking": "windowed_residue_reconstruction",
         "max_residues": max_residues,
         "stride": stride,
@@ -250,6 +266,7 @@ def _write_metadata_json(
             for key, value in view_arrays.items()
         },
         "view_metadata": view_metadata,
+        "region_mask_json": str(region_mask_json) if region_mask_json is not None else None,
         "gpcrdb_column": gpcrdb_column,
         "created_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
@@ -296,7 +313,70 @@ def _stack_view_blocks(view_blocks: list[dict[str, np.ndarray]]) -> dict[str, np
     }
 
 
-#TODO: Change output artifact from csv to npz for ml flow
+def _region_extra_arrays(view_rows: list[EmbeddingViews]) -> dict[str, np.ndarray]:
+    if not view_rows:
+        return {}
+
+    region_summary = view_rows[0].metadata.get("region_residue_counts")
+    if not isinstance(region_summary, Mapping):
+        return {}
+
+    region_names = sorted(str(name) for name in region_summary.keys())
+
+    count_rows: list[list[int]] = []
+    for views in view_rows:
+        counts_obj = views.metadata.get("region_residue_counts")
+
+        if not isinstance(counts_obj, Mapping):
+            count_rows.append([0 for _ in region_names])
+            continue
+
+        count_rows.append([
+            int(counts_obj.get(name, 0))
+            for name in region_names
+        ])
+
+    counts = np.array(count_rows, dtype=np.int16)
+
+    return {
+        "region_names": np.array(region_names, dtype=str),
+        "region_residue_counts": counts,
+        "region_missing_mask": counts == 0,
+    }
+
+
+def _views_for_result(
+    *,
+    entry_name: str,
+    result: ResidueEmbeddingResult,
+    region_cache: dict[str, RegionMasks] | None,
+) -> EmbeddingViews:
+    global_views = build_global_views(result)
+
+    if region_cache is None:
+        return global_views
+
+    masks = region_cache.get(entry_name)
+    if masks is None:
+        masks = empty_region_masks(
+            entry_name,
+            result.residue_embeddings.shape[0],
+        )
+    else:
+        masks = reconcile_length_arguments(
+            masks,
+            sequence_length=result.residue_embeddings.shape[0],
+        )
+        validate_region_masks(
+            masks,
+            sequence_length=result.residue_embeddings.shape[0],
+        )
+
+    region_views = build_region_views(result, masks)
+    return merge_views(global_views, region_views)
+
+
+# TODO: Change output artifact from csv to npz for ml flow
 @app.command()
 def coupling_map(
     input_csv: Path = typer.Argument(..., help="GPCR common coupling map CSV."),
@@ -311,6 +391,11 @@ def coupling_map(
         min=1,
         help="Window stride for residue reconstruction. Default none means non-overlapping windows.",
     ),
+    region_mask_json: Path | None = typer.Option(
+        None,
+        "--region-mask-json",
+        help="Optional local region-mask cache JSON for building region-aware embedding views.",
+    ),
     write_audit_csv: bool = typer.Option(
         True,
         "--audit/--no-audit",
@@ -320,7 +405,7 @@ def coupling_map(
         True,
         "--md/--no-md",
         help="""
-        Write metadata containing information from the embedding model and its parameters, 
+        Write metadata containing information from the embedding model and its parameters,
         including model type, embedding shape and dimension, and output .npz dimensions.
         """,
     ),
@@ -337,6 +422,7 @@ def coupling_map(
         raise typer.BadParameter("Output path must end in .npz")
 
     output_npz.parent.mkdir(parents=True, exist_ok=True)
+    region_cache = load_region_cache(region_mask_json) if region_mask_json is not None else None
 
     tokenizer, model, torch_device = load_plm(model_id, device=device)
     typer.echo(f"Embedding {len(entry_names)} unique receptors on {torch_device}.")
@@ -393,11 +479,16 @@ def coupling_map(
                     residue_results = [residue_results]
 
                 batch_views = [
-                    build_global_views(result)
-                    for result in residue_results
+                    _views_for_result(
+                        entry_name=row["gpcrdb_entry_name"],
+                        result=result,
+                        region_cache=region_cache,
+                    )
+                    for row, result in zip(batch_rows, residue_results, strict=True)
                 ]
 
-                view_blocks.append(stack_view_rows(batch_views, GLOBAL_VIEW_NAMES))
+                view_names = list(batch_views[0].arrays.keys())
+                view_blocks.append(stack_view_rows(batch_views, view_names))
                 view_rows.extend(batch_views)
                 records.extend(batch_rows)
 
@@ -413,7 +504,12 @@ def coupling_map(
             f"but records has {len(records)} rows."
         )
 
-    _write_npz(output_npz, records, view_arrays)
+    _write_npz(
+        output_npz,
+        records,
+        view_arrays,
+        extra_arrays=_region_extra_arrays(view_rows),
+    )
 
     audit_csv = _audit_csv_path(output_npz) if write_audit_csv else None
     if audit_csv is not None:
@@ -422,17 +518,19 @@ def coupling_map(
             records,
         )
 
-    _write_metadata_json(
-        output_npz,
-        input_csv=input_csv,
-        model_id=model_id,
-        max_residues=max_residues,
-        stride=stride,
-        view_arrays=view_arrays,
-        view_metadata=merge_view_metadata(view_rows),
-        gpcrdb_column=gpcrdb_column,
-        audit_csv=audit_csv,
-    )
+    if write_metadata_json:
+        _write_metadata_json(
+            output_npz,
+            input_csv=input_csv,
+            model_id=model_id,
+            max_residues=max_residues,
+            stride=stride,
+            view_arrays=view_arrays,
+            view_metadata=merge_view_metadata(view_rows),
+            gpcrdb_column=gpcrdb_column,
+            audit_csv=audit_csv,
+            region_mask_json=region_mask_json,
+        )
 
     typer.echo(f"Wrote embeddings: {output_npz}")
     if audit_csv is not None:
