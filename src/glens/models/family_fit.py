@@ -458,7 +458,6 @@ def _make_model(
     reducer_components: int | None,
     random_state: int,
     svd_n_iter: int,
-    scale_reduced: bool,
 ) -> Any:
     alpha_grid = np.array(alphas, dtype=np.float64)
 
@@ -482,9 +481,6 @@ def _make_model(
 
     if reducer_step is not None:
         steps.append(reducer_step)
-
-        if scale_reduced:
-            steps.append(StandardScaler())
 
     steps.append(regressor)
 
@@ -844,14 +840,6 @@ def family(
         "--reducer-components",
         help="Number of PCA/SVD components. Required unless --reducer none.",
     ),
-    scale_reduced: bool = typer.Option(
-        False,
-        "--scale-reduced/--no-scale-reduced",
-        help=(
-            "Standardize reduced PCA/SVD components before ridge. "
-            "Off by default because it changes the PCA/SVD variance weighting."
-        ),
-    ),
     svd_n_iter: int = typer.Option(
         7,
         "--svd-n-iter",
@@ -915,7 +903,6 @@ def family(
         reducer_components=reducer_components,
         random_state=random_state,
         svd_n_iter=svd_n_iter,
-        scale_reduced=scale_reduced,
     )
 
     cv_result = _cross_val_predict_with_diagnostics(
@@ -933,11 +920,7 @@ def family(
             "model": (
                 "StandardScaler + RidgeCV"
                 if reducer == ReducerKind.NONE
-                else (
-                    f"StandardScaler + {reducer.value}"
-                    f"{' + StandardScaler' if scale_reduced else ''}"
-                    " + RidgeCV"
-                )
+                else f"StandardScaler + {reducer.value} + RidgeCV"
             ),
             "ridge_mode": ridge_mode.value,
             "reducer": reducer.value,
@@ -946,7 +929,6 @@ def family(
                 if reducer_components is not None
                 else None
             ),
-            "scale_reduced": bool(scale_reduced),
             "reducer_cv_summary": reducer_cv_summary,
             "svd_n_iter": (
                 int(svd_n_iter)
@@ -1017,7 +999,6 @@ def family(
                 if reducer_components is not None
                 else None
             ),
-            "scale_reduced": bool(scale_reduced),
             "selected_reducer_summary": selected_reducer_summary,
             "target_source": targets.label_source,
             "target_transform": "% of 1' G protein family / 100; no softmax; no row normalization",
@@ -1047,7 +1028,6 @@ def family(
     typer.echo(f"Reducer: {reducer.value}")
     if reducer_components is not None:
         typer.echo(f"Reducer components: {reducer_components}")
-    typer.echo(f"Scale reduced components: {scale_reduced}")
     typer.echo(f"Wrote model: {model_out}")
     typer.echo(f"Wrote metrics: {metrics_json}")
     typer.echo(f"Wrote labeled CV predictions: {predictions_csv}")
