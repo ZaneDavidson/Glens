@@ -61,7 +61,7 @@ class BlockwiseReducer(BaseEstimator, TransformerMixin):
     """Fit independent fold-local reducers for contiguous feature blocks.
 
     Input X is expected to be a column-wise concatenation of the requested blocks,
-    in the same order as ``block_names`` and ``block_sizes``. This transformer is
+    in the same order as 'block_names' and 'block_sizes'. This transformer is
     intentionally sklearn-cloneable so that normal CV code can safely fit one
     blockwise reducer per training fold.
     """

@@ -1,8 +1,8 @@
 """Inference-time utilities for trained Glens models.
 
 This package owns model artifact loading, prediction I/O, and ensemble
-prediction. Training code belongs under ``glens.models``; mutation-design
-scoring belongs under ``glens.design``.
+prediction. Training code belongs under 'glens.models'; mutation-design
+scoring belongs under 'glens.design'.
 """
 
 from .ensembles import (

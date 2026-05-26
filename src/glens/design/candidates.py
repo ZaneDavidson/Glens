@@ -41,7 +41,7 @@ class MutationCandidate:
 
     @property
     def label(self) -> str:
-        """One-based compact mutation label, e.g. ``R135A``."""
+        """One-based compact mutation label, e.g. 'R135A'."""
         return mutation_label(self.mutation)
 
     def as_dict(self) -> dict[str, Any]:

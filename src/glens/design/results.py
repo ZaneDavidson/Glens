@@ -2,7 +2,7 @@
 
 This module converts mutation candidates plus model-ensemble predictions into
 ranked, CSV-ready design records. It intentionally does not load models or
-embed sequences. Model-side prediction wiring belongs under ``glens.models``;
+embed sequences. Model-side prediction wiring belongs under 'glens.models';
 this module only consumes prediction-like objects.
 
 The common batch layout is:
@@ -54,7 +54,7 @@ class FamilyEnsemblePredictionLike(Protocol):
 
     @property
     def weighted_mean(self) -> FloatArray:
-        """Weighted mean predictions, shape ``(n_rows, n_families)``."""
+        """Weighted mean predictions, shape '(n_rows, n_families)'."""
         ...
 
     def scores_by_model_for_row(self, row_index: int) -> FloatArray:
@@ -139,7 +139,7 @@ def build_mutation_design_result(
 ) -> MutationDesignResult:
     """Build one mutation design result from WT and mutant prediction rows.
 
-    ``wt_prediction`` and ``mutant_prediction`` may be the same object when WT
+    'wt_prediction' and 'mutant_prediction' may be the same object when WT
     and mutants are predicted together in one batch.
     """
     _validate_prediction_compatibility(wt_prediction, mutant_prediction)

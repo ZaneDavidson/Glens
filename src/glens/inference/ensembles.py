@@ -4,16 +4,16 @@ This module owns model-side ensemble wiring. Design code should not need to know
 whether a trained model expects one global embedding view or a concatenation of
 regional embedding blocks.
 
-Current saved model artifacts from ``family`` and ``family-blockwise`` contain
+Current saved model artifacts from 'family' and 'family-blockwise' contain
 enough metadata to infer their required feature view:
 
-* global family models store ``embedding_key``
-* blockwise family models store ``embedding_blocks``
+* global family models store 'embedding_key'
+* blockwise family models store 'embedding_blocks'
 
 The ensemble implemented here is deliberately transparent: it loads trained
 models, predicts family scores per model, and exposes the full prediction tensor
 plus weighted summaries. It does not perform WT-vs-mutant scoring; that belongs
-under ``glens.design``.
+under 'glens.design'.
 """
 
 from __future__ import annotations
@@ -146,12 +146,12 @@ class FamilyEnsemblePrediction:
 
     @property
     def mean(self) -> FloatArray:
-        """Unweighted mean predictions, shape ``(n_rows, n_families)``."""
+        """Unweighted mean predictions, shape '(n_rows, n_families)'."""
         return cast(FloatArray, np.mean(self.predictions, axis=0))
 
     @property
     def weighted_mean(self) -> FloatArray:
-        """Weighted mean predictions, shape ``(n_rows, n_families)``."""
+        """Weighted mean predictions, shape '(n_rows, n_families)'."""
         return cast(
             FloatArray,
             np.average(
@@ -163,7 +163,7 @@ class FamilyEnsemblePrediction:
 
     @property
     def sd(self) -> FloatArray:
-        """Sample SD across models, shape ``(n_rows, n_families)``."""
+        """Sample SD across models, shape '(n_rows, n_families)'."""
         if self.n_models <= 1:
             return np.zeros((self.n_rows, self.n_families), dtype=np.float64)
         return cast(FloatArray, np.std(self.predictions, axis=0, ddof=1))
