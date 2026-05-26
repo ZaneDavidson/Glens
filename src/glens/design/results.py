@@ -2,7 +2,7 @@
 
 This module converts mutation candidates plus model-ensemble predictions into
 ranked, CSV-ready design records. It intentionally does not load models or
-embed sequences. Model-side prediction wiring belongs under 'glens.models';
+embed sequences. Model-side prediction wiring belongs under 'glens.inference';
 this module only consumes prediction-like objects.
 
 The common batch layout is:

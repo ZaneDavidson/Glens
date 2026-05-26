@@ -108,23 +108,27 @@ class FamilyEnsemblePrediction:
     predictions: np.ndarray
 
     def __post_init__(self) -> None:
-        arr = np.asarray(self.predictions)
+        arr = np.asarray(self.predictions, dtype=np.float64)
+        weights = tuple(float(weight) for weight in self.weights)
         if arr.ndim != 3:
             raise ValueError(
                 "predictions must have shape (n_models, n_rows, n_families)."
             )
         if arr.shape[0] != len(self.model_names):
             raise ValueError("model_names length does not match predictions.")
-        if arr.shape[0] != len(self.weights):
+        if arr.shape[0] != len(weights):
             raise ValueError("weights length does not match predictions.")
         if arr.shape[2] != len(self.family_names):
             raise ValueError("family_names length does not match predictions.")
         if not np.all(np.isfinite(arr)):
             raise ValueError("Ensemble predictions must be finite.")
-        if np.any(np.asarray(self.weights, dtype=np.float64) < 0.0):
+        if any(weight < 0.0 for weight in weights):
             raise ValueError("Ensemble weights must be non-negative.")
-        if float(np.sum(self.weights)) <= 0.0:
+        if sum(weights) <= 0.0:
             raise ValueError("At least one ensemble weight must be positive.")
+
+        object.__setattr__(self, "weights", weights)
+        object.__setattr__(self, "predictions", arr)
 
     @property
     def n_models(self) -> int:
