@@ -75,24 +75,6 @@ def _token_ids(tokenizer: Any) -> TokenIds:
     )
 
 
-def _mean_pool(
-    last_hidden: torch.Tensor,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    token_ids: TokenIds,
-) -> torch.Tensor:
-    valid = _valid_residue_mask(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        token_ids=token_ids,
-    )
-
-    mask = valid.unsqueeze(-1)
-    sums = (last_hidden * mask).sum(dim=1)
-    counts = mask.sum(dim=1).clamp(min=1)
-    return sums / counts
-
-
 def _valid_residue_mask(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -174,7 +156,7 @@ def _iter_windows(
         )
         return
 
-    # Exact backward-compatible non-overlap mode.
+    # non-overlap mode.
     if stride == max_residues:
         for start in range(0, length, max_residues):
             end = min(start + max_residues, length)
@@ -186,7 +168,7 @@ def _iter_windows(
             )
         return
 
-    # Overlap mode with final backfill so the C-terminal end is covered.
+    # Overlap mode with final backfill so C-terminal end is covered.
     starts = list(range(0, max(1, length - max_residues + 1), stride))
     final_start = max(0, length - max_residues)
 

@@ -1,18 +1,103 @@
 """CLI for sequence embedding."""
 
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import cast
 
 import requests
 import typer
+from tqdm.auto import tqdm
 
 from glens.data.gpcrdb import iter_gpcrdb_entry_names
 from glens.data.sequences import SequenceRecord, read_sequence_table_csv
-from glens.data.uniprot import fetch_uniprot_records
+from glens.data.uniprot import fetch_uniprot_record
 from glens.embeddings.artifact import EmbeddingRunConfig, write_sequence_embedding_artifact
 from glens.embeddings.model import DEFAULT_MAX_RESIDUES, DEFAULT_MODEL_ID, load_plm
 
+# can make the latter two options but we're already bloated
+BAR_WIDTH = 42
+WORKERS = 8
+TIMEOUT = 30.0
+
+
 app = typer.Typer(no_args_is_help=True)
+
+
+def _progress_status(text: str, width: int = BAR_WIDTH) -> str:
+    """Return a fixed-width tqdm postfix string."""
+    text = text.replace("\n", " ")
+
+    if len(text) > width:
+        text = text[: width - 1] + "…"
+
+    return f"{text:<{width}}"
+
+
+def _resolve_uniprot_records(entry_names: Sequence[str]) -> tuple[SequenceRecord, ...]:
+    """Resolve UniProt records concurrently while preserving input order."""
+    records: list[SequenceRecord | None] = [None for _ in entry_names]
+
+    with tqdm(
+        total=len(entry_names),
+        desc="Resolving UniProt",
+        unit="sequence",
+        dynamic_ncols=False,
+        ncols=118,
+        bar_format=(
+            "{desc}: {percentage:3.0f}%|{bar:32}| "
+            "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+        ),
+    ) as bar:
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            futures = {
+                pool.submit(_fetch_uniprot_record_worker, idx, entry_name): entry_name
+                for idx, entry_name in enumerate(entry_names)
+            }
+
+            for future in as_completed(futures):
+                idx, entry_name, record = future.result()
+                records[idx] = record
+                bar.set_postfix_str(_progress_status(entry_name))
+                bar.update(1)
+
+    missing = [
+        entry_names[idx]
+        for idx, record in enumerate(records)
+        if record is None
+    ]
+    if missing:
+        preview = ", ".join(missing[:5])
+        raise RuntimeError(f"Failed to resolve UniProt records: {preview}")
+
+    return tuple(cast(SequenceRecord, record) for record in records)
+
+
+def _fetch_uniprot_record_worker(
+    idx: int,
+    entry_name: str,
+) -> tuple[int, str, SequenceRecord]:
+    """Fetch one UniProt record in a worker-owned requests session."""
+    with requests.Session() as session:
+        record = fetch_uniprot_record(
+            entry_name,
+            session,
+            timeout=TIMEOUT,
+        )
+
+    return idx, entry_name, record
+
+
+def _fetch_uniprot_record_with_new_session(
+    idx: int,
+    entry_name: str,
+    timeout: float,
+) -> tuple[int, str, SequenceRecord]:
+    """Fetch one UniProt record in a worker-owned requests session."""
+    with requests.Session() as session:
+        record = fetch_uniprot_record(entry_name, session, timeout=timeout)
+
+    return idx, entry_name, record
 
 
 def _run_embedding(
@@ -138,17 +223,16 @@ def coupling_map(
     if dry_run:
         raise typer.Exit()
 
-    records: list[SequenceRecord] = []
-    typer.echo("Resolving UniProt sequences...", err=True)
-    with requests.Session() as session:
-        total = len(entry_names)
-        for idx, entry_name in enumerate(entry_names, start=1):
-            typer.echo(f"Resolving {idx}/{total}: {entry_name}", err=True)
-            records.extend(fetch_uniprot_records((entry_name,), session))
+    typer.echo(
+        f"Resolving UniProt sequences with {WORKERS} workers.",
+        err=True,
+    )
+    records = _resolve_uniprot_records(entry_names)
 
     typer.echo(f"Resolved {len(records)} sequences.", err=True)
+
     _run_embedding(
-        records=tuple(records),
+        records=records,
         output_npz=output_npz,
         model_id=model_id,
         batch_size=batch_size,

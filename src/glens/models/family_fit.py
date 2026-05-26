@@ -826,9 +826,9 @@ def family(
         help="Exclude complete-case rows whose four family targets sum to zero.",
     ),
     ridge_mode: RidgeMode = typer.Option(
-        RidgeMode.SHARED_ALPHA,
+        RidgeMode.ALPHA_PER_TARGET,
         "--ridge-mode",
-        help="Ridge strategy: shared_alpha, alpha_per_target, or independent_targets.", #alpha-per-target should prob be default but need to investigate
+        help="Ridge strategy: shared_alpha, alpha_per_target, or independent_targets.", 
     ),
     reducer: ReducerKind = typer.Option(
         ReducerKind.NONE,

@@ -53,6 +53,7 @@ DEFAULT_BLOCK_EMBEDDING_KEYS = (
     "X_icl3_mean",
     "X_h8_mean",
 )
+DEFAULT_BLOCK_EMBEDDING_KEYS_HELP = ", ".join(DEFAULT_BLOCK_EMBEDDING_KEYS)
 
 
 class BlockwiseReducer(BaseEstimator, TransformerMixin):
@@ -302,20 +303,16 @@ def _make_model(
         raise ValueError("Blockwise fit requires --blockwise-reducer pca or truncated_svd.")
 
     return make_pipeline(
-        BlockwiseReducer(
-            block_names=block_names,
-            block_sizes=block_sizes,
-            reducer=reducer,
-            n_components=components_per_block,
-            random_state=random_state,
-            svd_n_iter=svd_n_iter,
-        ),
-        # Standardize the concatenated PC/SVD scores before RidgeCV so components
-        # or blocks with larger retained variance do not get an accidental lower
-        # effective ridge penalty.
-        StandardScaler(),
-        _make_regressor(DEFAULT_ALPHAS, ridge_mode=ridge_mode),
-    )
+    BlockwiseReducer(
+        block_names=block_names,
+        block_sizes=block_sizes,
+        reducer=reducer,
+        n_components=components_per_block,
+        random_state=random_state,
+        svd_n_iter=svd_n_iter,
+    ),
+    _make_regressor(DEFAULT_ALPHAS, ridge_mode=ridge_mode),
+)
 
 
 def _validate_components(
@@ -376,8 +373,8 @@ def family_blockwise(
         None,
         "--embedding-block",
         help=(
-            "Repeatable NPZ region-view key. Defaults to X_tm3_cyt_mean, "
-            "X_tm5_cyt_mean, X_tm6_cyt_mean, X_icl2_mean, and X_h8_mean."
+            "Repeatable NPZ region-view key. Defaults to: "
+            f"{DEFAULT_BLOCK_EMBEDDING_KEYS_HELP}."
         ),
     ),
     blockwise_reducer: ReducerKind = typer.Option(
@@ -429,7 +426,7 @@ def family_blockwise(
         help="Exclude complete-case rows whose four family targets sum to zero.",
     ),
     ridge_mode: RidgeMode = typer.Option(
-        RidgeMode.SHARED_ALPHA,
+        RidgeMode.ALPHA_PER_TARGET,
         "--ridge-mode",
         help="Ridge strategy: shared_alpha, alpha_per_target, or independent_targets.",
     ),
@@ -513,8 +510,7 @@ def family_blockwise(
         {
             "created_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "model": (
-                f"blockwise StandardScaler + blockwise {blockwise_reducer.value} "
-                "+ StandardScaler + RidgeCV"
+                f"blockwise StandardScaler + blockwise {blockwise_reducer.value} + RidgeCV"
             ),
             "ridge_mode": ridge_mode.value,
             "blockwise_reducer": blockwise_reducer.value,
