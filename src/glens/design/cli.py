@@ -1,4 +1,4 @@
-"""Command-line tools for mutation-design workflows."""
+"""Command-line tools for the mutation design workflow."""
 
 import csv
 from enum import Enum
@@ -8,7 +8,6 @@ from typing import Any
 import typer
 
 from glens.design.candidates import (
-    # MutationCandidate
     ParsedMutationList,
     parse_point_mutation_csv,
     parse_point_mutation_file,
@@ -20,6 +19,13 @@ from glens.design.results import (
     per_model_delta_rows,
 )
 from glens.design.selectivity import DesignObjective
+from glens.design.sequences import (
+    build_wt_mutant_sequence_rows,
+    read_sequence_file,
+    sequence_rows_to_dicts,
+    sequence_rows_to_fasta,
+    validate_sequence_rows,
+)
 from glens.inference.ensembles import (
     load_family_model_ensemble,
     predict_family_model_ensemble,
@@ -31,7 +37,7 @@ from glens.inference.prediction_io import (
 )
 
 app = typer.Typer(
-    help="Design and score GPCR point-mutation candidates against changes in their predicted coupling selectivity.",
+    help="Design and score GPCR point-mutation candidates against changes in predicted coupling selectivity.",
     no_args_is_help=True,
 )
 
@@ -47,6 +53,102 @@ class MutationInputFormat(str, Enum):
 @app.callback()
 def design_main() -> None:
     """Design and score GPCR point-mutation candidates."""
+
+
+@app.command("make-mutant-sequence-table")
+def make_mutant_sequence_table(
+    wt_sequence_file: Path = typer.Argument(
+        ...,
+        help="WT sequence file in FASTA or plain text format.",
+    ),
+    mutation_list: Path = typer.Argument(
+        ...,
+        help="Text or CSV file containing point mutations such as R135A.",
+    ),
+    sequence_csv: Path = typer.Argument(
+        ...,
+        help="Output WT+mutant sequence table CSV.",
+    ),
+    fasta_out: Path | None = typer.Option(
+        None,
+        "--fasta-out",
+        help="Optional output FASTA with WT row 0 followed by mutant rows.",
+    ),
+    wt_sequence_id: str = typer.Option(
+        "WT",
+        "--wt-id",
+        help="Sequence id used for the WT row and mutant id prefix.",
+    ),
+    mutation_format: MutationInputFormat = typer.Option(
+        MutationInputFormat.AUTO,
+        "--mutation-format",
+        help="Mutation input format: auto, txt, or csv.",
+    ),
+    mutation_column: str = typer.Option(
+        "mutation",
+        "--mutation-column",
+        help="CSV column containing mutation labels when using CSV input.",
+    ),
+    note_column: str | None = typer.Option(
+        None,
+        "--note-column",
+        help="Optional CSV column containing notes, to be included in output.",
+    ),
+    parse_errors_csv: Path | None = typer.Option(
+        None,
+        "--parse-errors-csv",
+        help="Optional CSV for mutation parse/validation errors.",
+    ),
+    allow_parse_errors: bool = typer.Option(
+        False,
+        "--allow-parse-errors/--fail-on-parse-errors",
+        help="Continue with valid mutations when some mutation rows fail to parse.",
+    ),
+) -> None:
+    """Validate mutations against a WT sequence and write WT+mutant rows.
+
+    The output row order is the row contract expected by downstream embedding
+    and scoring:
+
+        row 0 = WT
+        rows 1..n = mutants in parsed mutation-list order
+    """
+    wt_sequence = read_sequence_file(wt_sequence_file)
+    parsed = _load_mutation_candidates(
+        mutation_list,
+        mutation_format=mutation_format,
+        mutation_column=mutation_column,
+        note_column=note_column,
+        sequence=wt_sequence,
+    )
+    _handle_parse_errors(
+        parsed,
+        parse_errors_csv=parse_errors_csv,
+        allow_parse_errors=allow_parse_errors,
+    )
+
+    if not parsed.candidates:
+        raise ValueError("No valid mutation candidates were parsed.")
+
+    rows = build_wt_mutant_sequence_rows(
+        wt_sequence=wt_sequence,
+        candidates=parsed.candidates,
+        wt_sequence_id=wt_sequence_id,
+    )
+    validate_sequence_rows(rows)
+    _write_rows_csv(sequence_csv, sequence_rows_to_dicts(rows))
+
+    if fasta_out is not None:
+        fasta_out.parent.mkdir(parents=True, exist_ok=True)
+        fasta_out.write_text(sequence_rows_to_fasta(rows), encoding="utf-8")
+
+    typer.echo(f"WT sequence length: {len(wt_sequence)}")
+    typer.echo(f"Parsed valid mutations: {len(parsed.candidates)}")
+    if parsed.errors:
+        typer.echo(f"Parse errors: {len(parsed.errors)}")
+    typer.echo(f"Wrote sequence table: {sequence_csv}")
+    if fasta_out is not None:
+        typer.echo(f"Wrote FASTA: {fasta_out}")
 
 
 @app.command("score-mutations")
@@ -84,6 +186,14 @@ def score_mutations(
         help=(
             "Precomputed embedding NPZ with WT at row 0 and mutant rows 1..n. "
             "Requires --ensemble-manifest."
+        ),
+    ),
+    wt_sequence_file: Path | None = typer.Option(
+        None,
+        "--wt-sequence",
+        help=(
+            "Optional WT sequence FASTA/plain text file. If provided, mutation "
+            "labels are validated against WT residues before scoring."
         ),
     ),
     avoid_family: list[str] | None = typer.Option(
@@ -139,19 +249,23 @@ def score_mutations(
     This first version assumes the prediction/embedding batch has WT at row 0
     and mutants in rows 1..n in the same order as the parsed mutation list.
     """
-    #On-demand sequence embedding can later generate exactly the batch layout.
+    wt_sequence = (
+        read_sequence_file(wt_sequence_file)
+        if wt_sequence_file is not None
+        else None
+    )
     parsed = _load_mutation_candidates(
         mutation_list,
         mutation_format=mutation_format,
         mutation_column=mutation_column,
         note_column=note_column,
+        sequence=wt_sequence,
     )
-
-    if parsed.errors and parse_errors_csv is not None:
-        _write_rows_csv(parse_errors_csv, [error.as_dict() for error in parsed.errors])
-
-    if parsed.errors and not allow_parse_errors:
-        parsed.raise_if_errors()
+    _handle_parse_errors(
+        parsed,
+        parse_errors_csv=parse_errors_csv,
+        allow_parse_errors=allow_parse_errors,
+    )
 
     candidates = parsed.candidates
     if not candidates:
@@ -195,6 +309,7 @@ def _load_mutation_candidates(
     mutation_format: MutationInputFormat,
     mutation_column: str,
     note_column: str | None,
+    sequence: str | None = None,
 ) -> ParsedMutationList:
     use_csv = mutation_format == MutationInputFormat.CSV or (
         mutation_format == MutationInputFormat.AUTO and path.suffix.lower() == ".csv"
@@ -203,12 +318,30 @@ def _load_mutation_candidates(
     if use_csv:
         return parse_point_mutation_csv(
             path,
+            sequence=sequence,
             mutation_column=mutation_column,
             note_column=note_column,
             fail_fast=False,
         )
 
-    return parse_point_mutation_file(path, fail_fast=False)
+    return parse_point_mutation_file(
+        path,
+        sequence=sequence,
+        fail_fast=False,
+    )
+
+
+def _handle_parse_errors(
+    parsed: ParsedMutationList,
+    *,
+    parse_errors_csv: Path | None,
+    allow_parse_errors: bool,
+) -> None:
+    if parsed.errors and parse_errors_csv is not None:
+        _write_rows_csv(parse_errors_csv, [error.as_dict() for error in parsed.errors])
+
+    if parsed.errors and not allow_parse_errors:
+        parsed.raise_if_errors()
 
 
 def _load_prediction_source(
