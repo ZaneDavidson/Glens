@@ -30,7 +30,10 @@ def _run_embedding(
     write_audit_csv: bool,
     write_metadata_json: bool,
 ) -> None:
+    typer.echo(f"Loading embedding model: {model_id}", err=True)
     tokenizer, model, torch_device = load_plm(model_id, device=device)
+    typer.echo(f"Loaded embedding model on {torch_device}.", err=True)
+
     typer.echo(f"Embedding {len(records)} sequences on {torch_device}.")
     config = EmbeddingRunConfig(
         model_id=model_id,
@@ -82,12 +85,14 @@ def sequence_table(
     write_metadata_json: bool = typer.Option(True, "--md/--no-md", help="Write output metadata JSON."),
 ) -> None:
     """Embed arbitrary sequence rows from a source-agnostic CSV table."""
+    typer.echo(f"Reading sequence table: {input_csv}", err=True)
     records = read_sequence_table_csv(
         input_csv,
         id_column=id_column,
         sequence_column=sequence_column,
         default_gpcrdb_entry_name=default_gpcrdb_entry_name,
     )
+    typer.echo(f"Found {len(records)} sequence rows.", err=True)
     _run_embedding(
         records=records,
         output_npz=output_npz,
@@ -117,17 +122,33 @@ def coupling_map(
     region_mask_json: Path | None = typer.Option(None, "--region-mask-json", help="Optional region-mask cache JSON."),
     write_audit_csv: bool = typer.Option(True, "--audit/--no-audit", help="Write output audit CSV."),
     write_metadata_json: bool = typer.Option(True, "--md/--no-md", help="Write output metadata JSON."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Parse the coupling map and report receptor count without resolving sequences or loading the model.",
+    ),
 ) -> None:
     """Resolve unique GPCRdb entries through UniProt and embed the sequences."""
+    typer.echo(f"Reading coupling map: {input_csv}", err=True)
     entry_names = tuple(iter_gpcrdb_entry_names(input_csv, gpcrdb_column))
+    typer.echo(f"Found {len(entry_names)} unique GPCRdb entries.", err=True)
+
     if not entry_names:
         raise typer.BadParameter("No receptor entries found in the coupling map.")
+    if dry_run:
+        raise typer.Exit()
 
+    records: list[SequenceRecord] = []
+    typer.echo("Resolving UniProt sequences...", err=True)
     with requests.Session() as session:
-        records = tuple(fetch_uniprot_records(entry_names, session))
+        total = len(entry_names)
+        for idx, entry_name in enumerate(entry_names, start=1):
+            typer.echo(f"Resolving {idx}/{total}: {entry_name}", err=True)
+            records.extend(fetch_uniprot_records((entry_name,), session))
 
+    typer.echo(f"Resolved {len(records)} sequences.", err=True)
     _run_embedding(
-        records=records,
+        records=tuple(records),
         output_npz=output_npz,
         model_id=model_id,
         batch_size=batch_size,

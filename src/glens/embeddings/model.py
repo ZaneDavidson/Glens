@@ -357,10 +357,8 @@ def embed_sequences(
     mixed_precision: bool = True,
 ) -> np.ndarray:
     """
-    Backward-compatible global mean embedding.
-
-    Function now calls embed_residue_sequences(...) and mean-pools reconstructed
-    residue embeddings, for when single X matrix expected.
+    Global mean embedding.
+    Function mean-pools reconstructed residue embeddings, for when single X matrix expected.
     """
     single_input = isinstance(sequences, str)
 
