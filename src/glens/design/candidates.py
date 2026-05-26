@@ -10,8 +10,6 @@ Two complementary mutation-entry modes are implemented in this module:
    positions or regions, then scores and ranks them in batch.
 """
 
-from __future__ import annotations
-
 import csv
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass

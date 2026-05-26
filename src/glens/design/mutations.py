@@ -1,8 +1,6 @@
 """Point-mutation generation primitives.
 """
 
-from __future__ import annotations
-
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass

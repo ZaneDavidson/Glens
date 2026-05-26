@@ -8,8 +8,6 @@
 # TODO: On-demand sequence embedding will plug in later by producing the same embedding
 # table or prediction object and feeding to existing utilities.
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 

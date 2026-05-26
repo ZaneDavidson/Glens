@@ -1,22 +1,13 @@
 """Family-model ensemble prediction utilities.
 
-This module owns model-side ensemble wiring. Design code should not need to know
-whether a trained model expects one global embedding view or a concatenation of
-regional embedding blocks.
+This module is view-agnostic, i.e.,
 
 Current saved model artifacts from 'family' and 'family-blockwise' contain
 enough metadata to infer their required feature view:
 
 * global family models store 'embedding_key'
 * blockwise family models store 'embedding_blocks'
-
-The ensemble implemented here is deliberately transparent: it loads trained
-models, predicts family scores per model, and exposes the full prediction tensor
-plus weighted summaries. It does not perform WT-vs-mutant scoring; that belongs
-under 'glens.design'.
 """
-
-from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence

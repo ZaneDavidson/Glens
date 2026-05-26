@@ -13,8 +13,6 @@ The common batch layout is:
 but functions also expose explicit row indices for tests and advanced workflows.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias

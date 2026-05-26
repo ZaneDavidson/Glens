@@ -6,8 +6,6 @@ training receptors only, concatenates the fold-local reduced block scores, then
 standardizes the concatenated component table before RidgeCV.
 """
 
-from __future__ import annotations
-
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime

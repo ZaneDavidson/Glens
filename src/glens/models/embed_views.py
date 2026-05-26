@@ -5,8 +5,6 @@ These functions consume reconstructed residue-level embeddings and produce
 fixed-size arrays suitable for ridge, elastic-net, or future region-aware models.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 import numpy as np

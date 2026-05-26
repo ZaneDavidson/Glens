@@ -1,7 +1,5 @@
 """Command-line tools for mutation-design workflows."""
 
-from __future__ import annotations
-
 import csv
 from enum import Enum
 from pathlib import Path
