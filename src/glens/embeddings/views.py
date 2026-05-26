@@ -2,14 +2,14 @@
 Embedding view builders for GPCR sequence representations.
 
 These functions consume reconstructed residue-level embeddings and produce
-fixed-size arrays suitable for ridge, elastic-net, or future region-aware models.
+fixed-size arrays for inference.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
 
-from glens.models.embed_model import ResidueEmbeddingResult
+from glens.embeddings.model import ResidueEmbeddingResult
 from glens.models.regions import RegionMasks
 
 GLOBAL_VIEW_NAMES = ["X_global_mean", "X_global_std", "X_global_mean_std"]
@@ -415,7 +415,7 @@ def stack_view_rows(
 
     return stacked
 
-
+#unused helper
 def _metadata_list(
     per_receptor_views: list[EmbeddingViews],
     key: str,

@@ -55,7 +55,7 @@ def design_main() -> None:
     """Design and score GPCR point-mutation candidates."""
 
 
-@app.command("make-mutant-sequence-table")
+@app.command("sequence-table")
 def make_mutant_sequence_table(
     wt_sequence_file: Path = typer.Argument(
         ...,
@@ -63,16 +63,16 @@ def make_mutant_sequence_table(
     ),
     mutation_list: Path = typer.Argument(
         ...,
-        help="Text or CSV file containing point mutations such as R135A.",
+        help="Text or CSV file containing point mutations.",
     ),
     sequence_csv: Path = typer.Argument(
         ...,
-        help="Output WT+mutant sequence table CSV.",
+        help="Output  sequence table CSV.",
     ),
     fasta_out: Path | None = typer.Option(
         None,
         "--fasta-out",
-        help="Optional output FASTA with WT row 0 followed by mutant rows.",
+        help="Optional output FASTA.",
     ),
     wt_sequence_id: str = typer.Option(
         "WT",
@@ -159,7 +159,7 @@ def score_mutations(
     ),
     results_csv: Path = typer.Argument(
         ...,
-        help="Output ranked mutation-result CSV.",
+        help="Output ranked result CSV.",
     ),
     target_family: str = typer.Option(
         ...,

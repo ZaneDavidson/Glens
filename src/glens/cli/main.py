@@ -2,7 +2,7 @@ import typer
 
 from .. import __version__
 from ..design.cli import app as design_app
-from ..models.batch_embed import app as batch_embed_app
+from ..embeddings.cli import app as batch_embed_app
 from ..models.family_blockwise_fit import family_blockwise
 from ..models.family_fit import app as family_fit_app
 from ..models.regions import app as regions_app
