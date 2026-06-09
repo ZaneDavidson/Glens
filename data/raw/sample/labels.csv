@@ -1,0 +1,6 @@
+receptor_id,variant_id,dataset,assay_type,ligand_context,cell_context,g_alpha_subtype,g_alpha_family,readout_type,value_raw,label_state,evidence_weight
+adrb2_human,WT,GproteinDb,integrated,reference,unknown,GNAS,,binary,1,positive,1.0
+adrb2_human,WT,GproteinDb,integrated,reference,unknown,GNAI1,,binary,nc,nc,1.0
+adrb2_human,WT,GproteinDb,integrated,reference,unknown,GNAQ,,binary,,missing,0.2
+m3_human,WT,GproteinDb,integrated,reference,unknown,GNAQ,,binary,1,positive,1.0
+m3_human,WT,GproteinDb,integrated,reference,unknown,GNAI1,,binary,weak,weak,0.5

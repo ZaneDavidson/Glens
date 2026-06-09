@@ -1,0 +1,11 @@
+inputs:
+  receptors_csv: data/raw/sample/receptors.csv
+  labels_csv: data/raw/sample/labels.csv
+  generic_numbers_csv: data/raw/sample/generic_numbers.csv
+outputs:
+  receptor_manifest: data/interim/receptor_manifest.parquet
+  label_fact_table: data/interim/label_fact_table.parquet
+  generic_number_maps: data/interim/generic_number_maps.parquet
+filters:
+  species: human
+  gpcr_class: A
