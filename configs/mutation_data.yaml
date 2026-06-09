@@ -1,0 +1,6 @@
+inputs:
+  receptor_manifest: data/interim/receptor_manifest.parquet
+  generic_number_maps: data/interim/generic_number_maps.parquet
+  mutations_csv: data/raw/sample/mutations.csv
+outputs:
+  mutation_manifest: data/interim/mutation_manifest.parquet

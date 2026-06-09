@@ -26,7 +26,7 @@ FAMILY_ALIASES = {
 
 
 @dataclass(frozen=True)
-class dataConfig:
+class DataConfig:
     receptors_csv: Path
     labels_csv: Path
     generic_numbers_csv: Path | None
@@ -54,7 +54,7 @@ def build_core_datasets(config_path: str | Path) -> dict[str, str]:
     }
 
 
-def load_config(path: str | Path) -> dataConfig:
+def load_config(path: str | Path) -> DataConfig:
     path = Path(path)
     with path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
@@ -63,10 +63,10 @@ def load_config(path: str | Path) -> dataConfig:
     outputs = raw.get("outputs", {})
     filters = raw.get("filters", {})
 
-    def p(value: str | None) -> Path | None:
-        if value in (None, ""):
+    def p(value: object) -> Path | None:
+        if value is None or value == "":
             return None
-        candidate = Path(value)
+        candidate = Path(str(value))
         return candidate if candidate.is_absolute() else base / candidate
 
     receptors_csv = p(inputs.get("receptors_csv"))
@@ -74,7 +74,7 @@ def load_config(path: str | Path) -> dataConfig:
     if receptors_csv is None or labels_csv is None:
         raise ValueError("Config must define inputs.receptors_csv and inputs.labels_csv")
 
-    return dataConfig(
+    return DataConfig(
         receptors_csv=receptors_csv,
         labels_csv=labels_csv,
         generic_numbers_csv=p(inputs.get("generic_numbers_csv")),

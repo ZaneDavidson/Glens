@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 data/interim/*.parquet
 *.egg-info
+.DS_Store
+.mypy_cache/

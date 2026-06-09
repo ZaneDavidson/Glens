@@ -1,0 +1,4 @@
+receptor_id,mutation_string,variant_id,source,has_experimental_label
+adrb2_human,D80A,,user,false
+adrb2_human,D130A+R131Q,,user,false
+m3_human,D148A,m3_demo_d148a,literature_stub,true
