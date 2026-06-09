@@ -1,0 +1,29 @@
+inputs:
+  # Put the provided common coupling map here, or adjust this path.
+  common_coupling_map_csv: data/raw/GPCR_common_coupling_map.csv
+  # Optional user-curated receptor seed table. Useful when you already have accessions/sequences.
+  receptor_seed_csv:
+
+uniprot:
+  # Leave false for reproducible/offline tests. Set true to resolve missing sequences.
+  enabled: true
+  cache_dir: data/raw/cache/uniprot
+  reviewed_only: true
+  organism_id: 9606
+  timeout_seconds: 20
+
+options:
+  # Core receptor CSVs must have sequences because build-core-datasets validates sequences.
+  # Unresolved rows are still written to unresolved_receptors.csv for follow-up.
+  require_sequences_for_core: true
+
+outputs:
+  receptors_csv: data/raw/curated/receptors.csv
+  labels_csv: data/raw/curated/labels.csv
+  receptor_seeds_csv: data/raw/curated/receptor_seeds.csv
+  unresolved_receptors_csv: data/raw/curated/unresolved_receptors.csv
+  common_coupling_assays_csv: data/raw/curated/common_coupling_assays.csv
+  common_coupling_labels_csv: data/raw/curated/common_coupling_labels.csv
+  # statics
+  g_alpha_family_map_csv: data/raw/curated/g_alpha_family_map.csv
+  amino_acid_properties_csv: data/raw/curated/amino_acid_properties.csv

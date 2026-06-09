@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.glens.build_core_datasets import build_core_datasets, infer_label_state
+from glens.build_core_datasets import build_core_datasets, infer_label_state
 
 
 def test_build_pass1_sample(tmp_path: Path) -> None:

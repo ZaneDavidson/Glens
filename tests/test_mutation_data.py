@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.glens.mutation_data import (
+from glens.mutation_data import (
     apply_mutation_string,
     build_mutation_manifest_frame,
     canonical_mutation_string,

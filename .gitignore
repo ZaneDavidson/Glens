@@ -6,3 +6,4 @@ data/interim/*.parquet
 *.egg-info
 .DS_Store
 .mypy_cache/
+/data/

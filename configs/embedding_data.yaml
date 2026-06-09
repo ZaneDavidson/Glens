@@ -1,0 +1,18 @@
+inputs:
+  receptor_manifest: data/interim/receptor_manifest.parquet
+  generic_number_maps: data/interim/generic_number_maps.parquet
+  mutation_manifest: data/interim/mutation_manifest.parquet
+outputs:
+  residue_embeddings: data/embeddings/residue_embeddings.parquet
+  region_embeddings: data/embeddings/region_embeddings.parquet
+  mutation_embedding_deltas: data/embeddings/mutation_embedding_deltas.parquet
+embedding:
+  backend: aa_properties_v1
+  window_radius: 5
+  region_pools:
+    - ICL2
+    - ICL3
+    - H8
+    - TM5_CYT
+    - TM6_CYT
+    - TM7_H8
